@@ -163,7 +163,7 @@ function ClientSetup() {
 	const { me } = useMe();
 	const key = "sgk_….sgu_…";
 	const base = (id: string) =>
-		`${me.origin}${me.providers.find((provider) => provider.id === id)?.clientBasePath ?? ""}`;
+		`${me.proxyOrigin}${me.providers.find((provider) => provider.id === id)?.clientBasePath ?? ""}`;
 	return (
 		<Section title="クライアントの設定">
 			<div className="space-y-5 text-sm">

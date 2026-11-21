@@ -21,8 +21,8 @@ export interface MeJson {
 	user: MemberJson & { personalTokenHint: string | null };
 	members: MemberJson[];
 	providers: ProviderJson[];
-	/** sigw のオリジン(クライアントの設定例に使う) */
-	origin: string;
+	/** LLM を呼び出すときのオリジン(クライアントの base URL に使う) */
+	proxyOrigin: string;
 	/** 今月(日本時間) */
 	month: string;
 }
