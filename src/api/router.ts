@@ -215,7 +215,11 @@ route("GET", "/me", async ({ env, user, url }): Promise<MeJson> => {
 			label: provider.label,
 			clientBasePath: provider.clientBasePath,
 		})),
-		origin: url.origin,
+		// 手元(localhost)では、手元の Worker をそのまま使う
+		proxyOrigin:
+			env.PROXY_HOST && !["localhost", "127.0.0.1"].includes(url.hostname)
+				? `https://${env.PROXY_HOST}`
+				: url.origin,
 		month: monthOf(Date.now()),
 	};
 });

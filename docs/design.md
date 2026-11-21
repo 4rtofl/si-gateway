@@ -21,7 +21,7 @@ sigw は、Org のメンバー3人で LLM のクレジットを分け合うた�
 クライアント(SDK、Claude Code など)
    │  Authorization: Bearer sgk_….sgu_…
    ▼
-Cloudflare Worker「sigw」
+Cloudflare Worker「sigw」(Web UI・API は portal.sigw.4rtofl.org、中継は si.sigw.4rtofl.org)
    ├─ /openai/*  /anthropic/*  /xai/*  /openrouter/*   … 中継(src/proxy/)
    ├─ /api/*                                            … Web UI と CLI が使う JSON API(src/api/)
    ├─ /auth/*                                           … Discord OAuth(src/web/auth.ts)
@@ -82,7 +82,9 @@ sgk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.sgu_yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
 | `/xai/*`        | `https://api.x.ai/*`          | `Authorization: Bearer` |
 | `/openrouter/*` | `https://openrouter.ai/*`     | `Authorization: Bearer` |
 
-例: OpenAI の SDK は `base_url = https://<sigw>/openai/v1`、Claude Code は `ANTHROPIC_BASE_URL=https://<sigw>/anthropic`。
+例: OpenAI の SDK は `base_url = https://si.sigw.4rtofl.org/openai/v1`、Claude Code は `ANTHROPIC_BASE_URL=https://si.sigw.4rtofl.org/anthropic`。
+
+中継のパスは、どのドメインでも受け付けます。`si.sigw.4rtofl.org`(`PROXY_HOST`)では中継だけを受け付け、画面・API・ログインのパスは 404 にします。このため、Static Assets よりも先に、すべてのリクエストを Worker が受けます(`assets.run_worker_first: true`)。
 
 ### 4.2 1回の呼び出しの流れ
 
@@ -171,7 +173,7 @@ sgk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.sgu_yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
 
 ## 7. Web UI
 
-`ui/` にある React の SPA です。部品は [easyui](https://easyui.site)(MIT)を shadcn CLI で `ui/src/components/ui/` に取り込んで使います。easyui の Form は暗い配色で作られているので、画面はダークテーマだけにしています。ビルドしたもの(`ui/dist`)は Worker の Static Assets が返し、API・ログイン・中継のパスだけを Worker が受けます(`wrangler.jsonc` の `assets.run_worker_first`)。
+`ui/` にある React の SPA です。部品は [easyui](https://easyui.site)(MIT)を shadcn CLI で `ui/src/components/ui/` に取り込んで使います。easyui の Form は暗い配色で作られているので、画面はダークテーマだけにしています。ビルドしたもの(`ui/dist`)は、Worker が `env.ASSETS` を通して返します。
 
 Discord の OAuth2(scope は `identify`)でログインします。`ALLOWED_DISCORD_IDS` にある3人だけが入れます。
 

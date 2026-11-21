@@ -4,6 +4,11 @@ Org の3人で LLM のクレジットを分け合うためのゲートウェイ�
 
 設計の詳細は [docs/design.md](docs/design.md) にあります。
 
+| ドメイン                 | 使い道                                  |
+| ------------------------ | --------------------------------------- |
+| `portal.sigw.4rtofl.org` | Web UI と CLI                           |
+| `si.sigw.4rtofl.org`     | LLM の呼び出し(クライアントの base URL) |
+
 ## 使い方
 
 ### 1. 個人トークンを発行する
@@ -21,20 +26,20 @@ API キーには、sigw キーと個人トークンを `.` でつないだ文字
 
 ```sh
 # Claude Code
-export ANTHROPIC_BASE_URL=https://portal.sigw.4rtofl.org/anthropic
+export ANTHROPIC_BASE_URL=https://si.sigw.4rtofl.org/anthropic
 export ANTHROPIC_API_KEY=sgk_xxxx.sgu_yyyy
 
 # OpenAI の SDK
-export OPENAI_BASE_URL=https://portal.sigw.4rtofl.org/openai/v1
+export OPENAI_BASE_URL=https://si.sigw.4rtofl.org/openai/v1
 export OPENAI_API_KEY=sgk_xxxx.sgu_yyyy
 ```
 
-| プロバイダ | base URL                                           |
-| ---------- | -------------------------------------------------- |
-| OpenAI     | `https://portal.sigw.4rtofl.org/openai/v1`         |
-| Anthropic  | `https://portal.sigw.4rtofl.org/anthropic`         |
-| xAI        | `https://portal.sigw.4rtofl.org/xai/v1`            |
-| OpenRouter | `https://portal.sigw.4rtofl.org/openrouter/api/v1` |
+| プロバイダ | base URL                                       |
+| ---------- | ---------------------------------------------- |
+| OpenAI     | `https://si.sigw.4rtofl.org/openai/v1`         |
+| Anthropic  | `https://si.sigw.4rtofl.org/anthropic`         |
+| xAI        | `https://si.sigw.4rtofl.org/xai/v1`            |
+| OpenRouter | `https://si.sigw.4rtofl.org/openrouter/api/v1` |
 
 - 各プロバイダの API をそのまま中継するので、SDK もプロバイダ固有の機能も、そのまま使えます
 - バッチ API と Realtime API は、使用量を記録できないので使えません

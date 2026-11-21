@@ -367,7 +367,10 @@ async function main(): Promise<void> {
 			console.log(`メンバー: ${me.members.map((m) => m.name).join("、")}`);
 			table(
 				["プロバイダ", "base URL"],
-				me.providers.map((p) => [p.label, `${me.origin}${p.clientBasePath}`]),
+				me.providers.map((p) => [
+					p.label,
+					`${me.proxyOrigin}${p.clientBasePath}`,
+				]),
 			);
 			return;
 		}

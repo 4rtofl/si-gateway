@@ -4,6 +4,7 @@
  * - /api/*: JSON API(src/api/)
  * - /auth/*: Discord でのログイン(src/web/auth.ts)
  * - それ以外: Web UI(ui/ をビルドしたもの。Static Assets が返す)
+ * PROXY_HOST(si.sigw.4rtofl.org)では中継だけを受け付け、ほかのパスは 404 にする。
  */
 
 import { handleApi } from "./api/router.ts";
@@ -27,6 +28,14 @@ export default {
 				provider.provider,
 				provider.upstreamPath,
 				url.search,
+			);
+		}
+		if (env.PROXY_HOST && url.hostname === env.PROXY_HOST) {
+			return Response.json(
+				{
+					error: `${env.PROXY_HOST} は LLM の中継だけに使います。/openai、/anthropic、/xai、/openrouter で始まるパスを指定してください`,
+				},
+				{ status: 404 },
 			);
 		}
 		if (url.pathname === "/api" || url.pathname.startsWith("/api/")) {
