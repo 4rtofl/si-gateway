@@ -4,6 +4,9 @@
 	"name": "sigw",
 	"main": "src/index.ts",
 	"compatibility_date": "2026-11-01",
+	// Web UI と API を portal.sigw.4rtofl.org で公開する(4rtofl.org は同じアカウントのゾーン)。workers.dev でも引き続き使える
+	"routes": [{ "pattern": "portal.sigw.4rtofl.org", "custom_domain": true }],
+	"workers_dev": true,
 	// Web UI(ui/ を Vite でビルドしたもの)。API・ログイン・中継のパスは、先に Worker が受ける
 	"assets": {
 		"directory": "./ui/dist",

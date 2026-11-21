@@ -21,20 +21,20 @@ API キーには、sigw キーと個人トークンを `.` でつないだ文字
 
 ```sh
 # Claude Code
-export ANTHROPIC_BASE_URL=https://sigw.4rna-y.workers.dev/anthropic
+export ANTHROPIC_BASE_URL=https://portal.sigw.4rtofl.org/anthropic
 export ANTHROPIC_API_KEY=sgk_xxxx.sgu_yyyy
 
 # OpenAI の SDK
-export OPENAI_BASE_URL=https://sigw.4rna-y.workers.dev/openai/v1
+export OPENAI_BASE_URL=https://portal.sigw.4rtofl.org/openai/v1
 export OPENAI_API_KEY=sgk_xxxx.sgu_yyyy
 ```
 
-| プロバイダ | base URL                                            |
-| ---------- | --------------------------------------------------- |
-| OpenAI     | `https://sigw.4rna-y.workers.dev/openai/v1`         |
-| Anthropic  | `https://sigw.4rna-y.workers.dev/anthropic`         |
-| xAI        | `https://sigw.4rna-y.workers.dev/xai/v1`            |
-| OpenRouter | `https://sigw.4rna-y.workers.dev/openrouter/api/v1` |
+| プロバイダ | base URL                                           |
+| ---------- | -------------------------------------------------- |
+| OpenAI     | `https://portal.sigw.4rtofl.org/openai/v1`         |
+| Anthropic  | `https://portal.sigw.4rtofl.org/anthropic`         |
+| xAI        | `https://portal.sigw.4rtofl.org/xai/v1`            |
+| OpenRouter | `https://portal.sigw.4rtofl.org/openrouter/api/v1` |
 
 - 各プロバイダの API をそのまま中継するので、SDK もプロバイダ固有の機能も、そのまま使えます
 - バッチ API と Realtime API は、使用量を記録できないので使えません
@@ -51,7 +51,7 @@ export OPENAI_API_KEY=sgk_xxxx.sgu_yyyy
 Web UI の「設定」で CLI トークン(`sgc_…`)を発行して使います。
 
 ```sh
-pnpm cli login https://sigw.4rna-y.workers.dev
+pnpm cli login https://portal.sigw.4rtofl.org
 pnpm cli keys
 pnpm cli usage --by model
 pnpm cli settle preview
@@ -63,7 +63,7 @@ pnpm cli --help
 用意するもの:
 
 - Cloudflare のアカウント(Workers Paid)と D1 のデータベース `sigw`(`pnpm exec wrangler d1 create sigw --location apac`)
-- sigw 専用の Discord アプリ。OAuth2 の Redirects に `https://sigw.4rna-y.workers.dev/auth/callback` と `http://localhost:8787/auth/callback` を入れる
+- sigw 専用の Discord アプリ。OAuth2 の Redirects に `https://portal.sigw.4rtofl.org/auth/callback`、`https://sigw.4rna-y.workers.dev/auth/callback`、`http://localhost:8787/auth/callback` を入れる
 - Daichoo の台帳にコミットする GitHub App の秘密鍵(Daichoo の App をそのまま使う)
 - プロバイダキーを暗号化する鍵(`openssl rand -base64 32`)。なくすと、登録したプロバイダキーを読めなくなる
 
