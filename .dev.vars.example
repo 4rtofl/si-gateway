@@ -1,0 +1,11 @@
+# 手元で使うシークレット。このファイルを .dev.vars にコピーして値を入れる(.dev.vars は Git に入れない)。
+# 「pnpm dev」(wrangler dev)が読み込む。本番には「pnpm exec wrangler secret bulk .dev.vars」で入れる。
+
+# sigw 専用の Discord アプリの OAuth2 の Client Secret(Web UI のログインに使う)
+DISCORD_CLIENT_SECRET=
+# プロバイダキーを暗号化する鍵。「openssl rand -base64 32」で作る。なくすと、登録したプロバイダキーを読めなくなる
+KEY_ENCRYPTION_SECRET=
+# Daichoo の台帳にコミットする GitHub App の秘密鍵。.pem ファイルの中身を、改行もそのままにして、全体をダブルクォートで囲む
+GITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----
+...
+-----END RSA PRIVATE KEY-----"

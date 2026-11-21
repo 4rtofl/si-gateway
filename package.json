@@ -1,0 +1,35 @@
+{
+	"name": "sigw",
+	"private": true,
+	"description": "Org で共有する LLM のキーを中継し、利用者ごとの使用量を Daichoo の台帳で精算する",
+	"type": "module",
+	"packageManager": "pnpm@12.15.0",
+	"engines": {
+		"node": ">=24"
+	},
+	"bin": {
+		"sigw": "cli/sigw.ts"
+	},
+	"scripts": {
+		"dev": "wrangler dev",
+		"dev:ui": "pnpm --filter sigw-ui dev",
+		"build": "pnpm --filter sigw-ui build",
+		"deploy": "pnpm build && pnpm migrate:remote && wrangler deploy",
+		"migrate:local": "wrangler d1 migrations apply sigw --local",
+		"migrate:remote": "wrangler d1 migrations apply sigw --remote",
+		"cf-typegen": "wrangler types --strict-vars=false",
+		"cli": "node cli/sigw.ts",
+		"test": "vitest run",
+		"test:watch": "vitest",
+		"lint": "biome check .",
+		"format": "biome check --write .",
+		"typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.node.json && pnpm --filter sigw-ui typecheck"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.6.8",
+		"@types/node": "^24.19.2",
+		"typescript": "^7.0.2",
+		"vitest": "^5.1.1",
+		"wrangler": "^4.166.0"
+	}
+}

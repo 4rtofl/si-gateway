@@ -1,0 +1,8 @@
+{
+	// CLI(cli/)と vitest の設定は Node.js で動くので、Node.js の型で確かめる
+	"extends": "./tsconfig.json",
+	"compilerOptions": {
+		"types": ["node"]
+	},
+	"include": ["cli/**/*.ts", "src/api/types.ts", "vitest.config.ts"]
+}
