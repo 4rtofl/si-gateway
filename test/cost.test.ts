@@ -65,6 +65,15 @@ describe("単価の検索", () => {
 		});
 		expect(findPrice(prices, "gpt-5")).toBeNull();
 	});
+
+	it("TypeSafe の版の番号と -latest を外した名前でも探す", () => {
+		const jev: Price = { input: 0.042e-6, output: 0 };
+		const prices = new Map([["jev", jev]]);
+		expect(findPrice(prices, "jev-1.14.0")).toEqual(jev);
+		expect(findPrice(prices, "jev-latest")).toEqual(jev);
+		const usage = { ...emptyUsage(), inputTokens: 1_000_000, outputTokens: 50 };
+		expect(computeCostNano(usage, jev)).toBe(42_000_000);
+	});
 });
 
 describe("LiteLLM の価格表", () => {
@@ -100,6 +109,12 @@ describe("LiteLLM の価格表", () => {
 				output_cost_per_token: 1e-6,
 			},
 			"dall-e-3": { litellm_provider: "openai", output_cost_per_pixel: 1 },
+			// TypeSafe は価格表から取り込まない(手で決めた単価を使う)
+			"typesafe/jev": {
+				litellm_provider: "typesafe",
+				input_cost_per_token: 1,
+				output_cost_per_token: 1,
+			},
 		});
 		expect(rows.map((row) => `${row.provider}:${row.model}`).sort()).toEqual([
 			"anthropic:claude-sonnet-4-5",

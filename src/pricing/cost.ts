@@ -59,6 +59,7 @@ export function withoutLongContext(price: Price): Price {
 /**
  * 単価表でモデルを探すときの候補。完全一致のあと、日付を外した名前を試す。
  * 例: claude-sonnet-4-5-20250929 → claude-sonnet-4-5、gpt-4o-2024-08-06 → gpt-4o
+ * 版の番号(jev-1.14.0)や -latest を外した名前も試す
  */
 export function modelCandidates(model: string): string[] {
 	const candidates = [model];
@@ -73,6 +74,9 @@ export function modelCandidates(model: string): string[] {
 	add(model.replace(/@\d{8}$/, ""));
 	// OpenRouter の「:free」「:beta」などの接尾辞
 	add(model.replace(/:[a-z-]+$/, ""));
+	// 版の番号と、最新の版を指す別名。例: jev-1.14.0 → jev、jev-latest → jev
+	add(model.replace(/-v?\d+\.\d+\.\d+$/, ""));
+	add(model.replace(/-latest$/, ""));
 	return candidates;
 }
 

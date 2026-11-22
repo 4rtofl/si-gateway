@@ -42,7 +42,7 @@ export default {
 		if (env.PROXY_HOST && url.hostname === env.PROXY_HOST) {
 			return Response.json(
 				{
-					error: `${env.PROXY_HOST} は LLM の中継だけに使います。/openai、/anthropic、/xai、/openrouter で始まるパスを指定してください`,
+					error: `${env.PROXY_HOST} は LLM の中継だけに使います。/openai、/anthropic、/xai、/openrouter、/typesafe で始まるパスを指定してください`,
 				},
 				{ status: 404 },
 			);

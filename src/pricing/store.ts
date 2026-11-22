@@ -213,7 +213,10 @@ export function extractLiteLlmPrices(
 ): { provider: ProviderId; model: string; price: Price }[] {
 	const byLiteLlm = new Map<string, ProviderId>();
 	for (const spec of Object.values(PROVIDERS)) {
-		byLiteLlm.set(spec.litellmProvider, spec.id);
+		// 価格表にないプロバイダ(TypeSafe)は取り込まない。手で決めた単価だけを使う
+		if (spec.litellmProvider !== null) {
+			byLiteLlm.set(spec.litellmProvider, spec.id);
+		}
 	}
 	const rows: { provider: ProviderId; model: string; price: Price }[] = [];
 	for (const [key, value] of Object.entries(data)) {

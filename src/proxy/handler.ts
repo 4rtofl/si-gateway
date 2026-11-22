@@ -73,11 +73,21 @@ export function errorResponse(
 	message: string,
 	code: string,
 ): Response {
-	const body =
-		provider.usageStyle === "anthropic"
-			? { type: "error", error: { type: code, message: `[sigw] ${message}` } }
-			: { error: { message: `[sigw] ${message}`, type: code, code } };
-	return Response.json(body, { status });
+	const text = `[sigw] ${message}`;
+	switch (provider.errorStyle) {
+		case "anthropic":
+			return Response.json(
+				{ type: "error", error: { type: code, message: text } },
+				{ status },
+			);
+		case "detail":
+			return Response.json({ detail: text }, { status });
+		default:
+			return Response.json(
+				{ error: { message: text, type: code, code } },
+				{ status },
+			);
+	}
 }
 
 /**

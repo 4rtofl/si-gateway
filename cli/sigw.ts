@@ -71,7 +71,7 @@ const HELP = `sigw の CLI ${VERSION}
   personal-token                      個人トークンを発行し直す
 
   provider-keys                       プロバイダキーの一覧
-  provider-keys add --provider <openai|anthropic|xai|openrouter> [--label 名前] [--delegated-only]
+  provider-keys add --provider <openai|anthropic|xai|openrouter|typesafe> [--label 名前] [--delegated-only]
                                       プロバイダキーを登録する(キーは標準入力から読む)。
                                       --delegated-only: 代理専用(Bobert からの呼び出しでだけ使える)
   provider-keys disable|enable <ID>   プロバイダキーを無効にする・有効に戻す

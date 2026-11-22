@@ -1,6 +1,6 @@
 # sigw 設計書
 
-sigw は、Org のメンバー3人で LLM のクレジットを分け合うためのゲートウェイです。誰か1人がプロバイダ(OpenAI、Anthropic、xAI、OpenRouter)でクレジットを買い、そのキーを sigw に登録します。ほかのメンバーは sigw を通してそのキーで LLM を呼び出します。sigw は呼び出しごとに「誰が、何の目的で、誰のキーを使ったか」を記録し、毎月1日に、使った分を [Daichoo](https://github.com/4rtofl/Daichoo) の台帳に書き込みます。支払いの一覧は Daichoo がいつもどおり Discord に送ります。
+sigw は、Org のメンバー3人で LLM のクレジットを分け合うためのゲートウェイです。誰か1人がプロバイダ(OpenAI、Anthropic、xAI、OpenRouter、TypeSafe)でクレジットを買い、そのキーを sigw に登録します。ほかのメンバーは sigw を通してそのキーで LLM を呼び出します。sigw は呼び出しごとに「誰が、何の目的で、誰のキーを使ったか」を記録し、毎月1日に、使った分を [Daichoo](https://github.com/4rtofl/Daichoo) の台帳に書き込みます。支払いの一覧は Daichoo がいつもどおり Discord に送ります。
 
 ## 1. 前提と方針
 
@@ -23,13 +23,13 @@ sigw は、Org のメンバー3人で LLM のクレジットを分け合うた�
    ▼                                              ▼  x-api-key: sgk_…、x-sigw-user: Discord ID
 Cloudflare Worker「sigw」(Web UI・API は portal.sigw.4rtofl.org、中継は si.sigw.4rtofl.org、
                          CLI のインストールスクリプトは cli.sigw.4rtofl.org)
-   ├─ /openai/*  /anthropic/*  /xai/*  /openrouter/*   … 中継(src/proxy/)
-   ├─ /api/*                                            … Web UI と CLI が使う JSON API(src/api/)
-   ├─ /auth/*                                           … Discord OAuth(src/web/auth.ts)
-   ├─ それ以外                                          … Web UI(ui/ をビルドしたもの。Static Assets が返す)
-   ├─ D1「sigw」                                        … キー、使用量、価格表、精算の記録
-   ├─ Cron(毎日)                                       … 価格表の同期、毎月1日の精算
-   └─ Cron(5分ごと)                                    … Managed Agents のセッションの使用量を読む
+   ├─ /openai/*  /anthropic/*  /xai/*  /openrouter/*  /typesafe/*   … 中継(src/proxy/)
+   ├─ /api/*                                                        … Web UI と CLI が使う JSON API(src/api/)
+   ├─ /auth/*                                                       … Discord OAuth(src/web/auth.ts)
+   ├─ それ以外                                                      … Web UI(ui/ をビルドしたもの。Static Assets が返す)
+   ├─ D1「sigw」                                                    … キー、使用量、価格表、精算の記録
+   ├─ Cron(毎日)                                                   … 価格表の同期、毎月1日の精算
+   └─ Cron(5分ごと)                                                … Managed Agents のセッションの使用量を読む
           │
           ├─ Anthropic の GET /v1/sessions/{id}
           ├─ LiteLLM の価格表(GitHub の raw)
@@ -85,6 +85,7 @@ sgk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.sgu_yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
 | `/anthropic/*`  | `https://api.anthropic.com/*` | `x-api-key`             |
 | `/xai/*`        | `https://api.x.ai/*`          | `Authorization: Bearer` |
 | `/openrouter/*` | `https://openrouter.ai/*`     | `Authorization: Bearer` |
+| `/typesafe/*`   | `https://api.typesafe.ai/*`   | `Authorization: Bearer` |
 
 例: OpenAI の SDK は `base_url = https://si.sigw.4rtofl.org/openai/v1`、Claude Code は `ANTHROPIC_BASE_URL=https://si.sigw.4rtofl.org/anthropic`。
 
@@ -94,7 +95,7 @@ sgk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.sgu_yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
 
 1. ヘッダーから sigw キーと個人トークンを取り出し、それぞれのハッシュを計算する
 2. sigw キーの設定、プロバイダキー(復号済み)、個人トークンの持ち主、今月の使用額を、**isolate のメモリのキャッシュ**から引く。なければ D1 から読む(読み取りはレプリカで足りるので、D1 の Sessions API で最寄りから読む)
-3. 有効期限、上限額、モデルの制限を確かめる。だめならプロバイダと同じ形のエラーを返す
+3. 有効期限、上限額、モデルの制限を確かめる。だめならプロバイダと同じ形のエラーを返す(OpenAI・xAI・OpenRouter は `{"error": {"message", "type", "code"}}`、Anthropic は `{"type": "error", "error": {"type", "message"}}`、TypeSafe は `{"detail": "…"}`)
 4. リクエストを転送する。本文に手を入れるのは次の場合だけ
    - OpenAI・xAI の `/chat/completions` で `stream: true` のとき、`stream_options.include_usage = true` を足す(最後のチャンクで使用量を受け取るため)
    - OpenRouter では `usage.include = true` を足す(使用量と実費を受け取るため)
@@ -169,12 +170,14 @@ Bobert は `env.SIGW.fetch(url, init)` で呼びます。パスは公開の入�
 | Anthropic                                 | `message_start` の `usage` と、`message_delta` の `usage`(累計)を合わせる                                                           |
 | xAI                                       | OpenAI と同じ。`total_tokens` が入力と出力の和より大きければ、差を出力に足す(推論のトークン)                                        |
 | OpenRouter                                | OpenAI と同じ形。`usage.cost`(USD)を実費として使う                                                                                  |
+| TypeSafe                                  | 応答の JSON の `usage.input_tokens` と `usage.output_tokens`(Bobert が使う `POST /v1/systemone` は、ストリーミングしない)           |
 
 ### 5.2 単価表
 
-- 毎日 0:05(日本時間)に、[LiteLLM の価格表](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json)から4つのプロバイダの分を D1 の `model_prices` に取り込む
+- 毎日 0:05(日本時間)に、[LiteLLM の価格表](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json)から4つのプロバイダ(OpenAI、Anthropic、xAI、OpenRouter)の分を D1 の `model_prices` に取り込む
+- TypeSafe は LiteLLM の価格表にないので、取り込まない。単価は手で決める。マイグレーション `0005` で、Jev(`jev`)の単価を手で決めた単価として入れてある(2026-11-04 時点で、入力は100万トークンあたり $0.042、出力は無料)
 - Web UI と CLI で、モデルごとの単価を手で決められる。手で決めた単価は、同期で上書きしない
-- モデル名は「完全一致 → 日付を外した名前」の順で探す
+- モデル名は「完全一致 → 日付を外した名前 → 版の番号や `-latest` を外した名前」の順で探す(例: `jev-1.14.0` と `jev-latest` は `jev` で引く)
 - 入力が20万トークンを超えたときの単価、1時間キャッシュの単価、OpenAI の `service_tier`(flex・priority)の単価が表にあれば使う
 - 単価が見つからない呼び出しは、料金を空のまま記録する。単価を足したあと、毎日の Cron(と精算の直前)で料金を計算し直す
 

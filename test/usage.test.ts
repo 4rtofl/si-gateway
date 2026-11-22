@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { PROVIDERS } from "../src/proxy/providers.ts";
 import {
 	collectFromJson,
 	collectFromSse,
@@ -179,6 +180,33 @@ describe("Anthropic の使用量", () => {
 		const report = collectFromJson(
 			JSON.stringify({ input_tokens: 999 }),
 			"anthropic",
+		);
+		expect(report.found).toBe(false);
+	});
+});
+
+describe("TypeSafe の使用量", () => {
+	it("System One の応答の usage.input_tokens と usage.output_tokens を読む", () => {
+		const report = collectFromJson(
+			JSON.stringify({
+				model: "jev-1.14.0",
+				answers: { ok: { type: "noul", noul: 0.9 } },
+				usage: { input_tokens: 1234, output_tokens: 5 },
+			}),
+			PROVIDERS.typesafe.usageStyle,
+		);
+		expect(report).toMatchObject({
+			model: "jev-1.14.0",
+			found: true,
+			complete: true,
+			usage: { inputTokens: 1234, cacheReadTokens: 0, outputTokens: 5 },
+		});
+	});
+
+	it("モデルの一覧(GET /v1/models)は使用量なしとして読む", () => {
+		const report = collectFromJson(
+			JSON.stringify({ object: "list", data: [{ id: "jev-latest" }] }),
+			PROVIDERS.typesafe.usageStyle,
 		);
 		expect(report.found).toBe(false);
 	});

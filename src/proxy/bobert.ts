@@ -19,7 +19,7 @@ export async function handleBobertRequest(
 		return Response.json(
 			{
 				error:
-					"BobertGateway は LLM の中継だけに使います。/openai、/anthropic、/xai、/openrouter で始まるパスを指定してください",
+					"BobertGateway は LLM の中継だけに使います。/openai、/anthropic、/xai、/openrouter、/typesafe で始まるパスを指定してください",
 			},
 			{ status: 404 },
 		);
