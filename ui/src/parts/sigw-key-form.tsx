@@ -24,9 +24,11 @@ export function ApiKeyInput({
 	delegatedOnly,
 	onChange,
 	required,
+	placeholder,
 }: {
 	label: string;
 	hint: string;
+	placeholder?: string;
 	apiKey: string;
 	delegatedOnly: boolean;
 	onChange: (next: { apiKey: string; delegatedOnly: boolean }) => void;
@@ -46,6 +48,7 @@ export function ApiKeyInput({
 						autoComplete="off"
 						showPasswordToggle
 						required={required}
+						placeholder={placeholder}
 					/>
 				)}
 			</Field>
@@ -66,26 +69,37 @@ function initialDate(ms: number | null | undefined): Date | null {
 }
 
 /**
- * sigw キーの発行と変更に使うフォーム。issuing なら、プロバイダごとに API キーを入れられる(発行のとき。1つ以上)。
- * 発行したあとの登録・差し替え・外すは、キーの詳細の画面でする
+ * sigw キーの発行と変更に使うフォーム。apiKeyMode を渡すと、プロバイダごとに API キーを入れられる。
+ * - "issue": 発行のとき。1つ以上入れる
+ * - "edit": 一覧の「編集」のとき。入れたプロバイダだけ登録・差し替えする。0個でもよい。外すのは、キーの詳細の画面でする
+ *
+ * 入れた API キーは input.apiKeys で渡す。apiKeyMode がなければ undefined
  */
 export function SigwKeyForm({
 	initial,
-	issuing = false,
+	apiKeyMode,
 	submitLabel,
 	onSubmit,
 }: {
 	initial?: SigwKeyJson;
-	issuing?: boolean;
+	apiKeyMode?: "issue" | "edit";
 	submitLabel: string;
 	onSubmit: (input: SigwKeyInput) => Promise<void>;
 }) {
 	const { me } = useMe();
 	const toast = useToast();
-	// プロバイダごとの API キー。空のプロバイダは登録しない
+	// プロバイダごとの API キー。空のプロバイダは登録しない。
+	// 登録済みのプロバイダの代理専用は、今の値から始める(新しいキーを入れたときだけ使う)
 	const [apiKeys, setApiKeys] = useState<
 		Record<string, { apiKey: string; delegatedOnly: boolean }>
-	>({});
+	>(() =>
+		Object.fromEntries(
+			(initial?.providerKeys ?? []).map((providerKey) => [
+				providerKey.provider,
+				{ apiKey: "", delegatedOnly: providerKey.delegatedOnly },
+			]),
+		),
+	);
 	const [purpose, setPurpose] = useState(initial?.purpose ?? "");
 	const [models, setModels] = useState(
 		initial?.allowedModels?.join("\n") ?? "",
@@ -107,14 +121,14 @@ export function SigwKeyForm({
 				apiKey: value.apiKey.trim(),
 				delegatedOnly: value.delegatedOnly,
 			}));
-		if (issuing && entered.length === 0) {
+		if (apiKeyMode === "issue" && entered.length === 0) {
 			toast("API キーを1つ以上入れてください。", "error");
 			return;
 		}
 		setBusy(true);
 		try {
 			await onSubmit({
-				apiKeys: issuing ? entered : undefined,
+				apiKeys: apiKeyMode ? entered : undefined,
 				purpose,
 				allowedModels: models.split(/[\s,]+/).filter((value) => value !== ""),
 				monthlyLimitUsd: limit.trim() === "" ? null : Number(limit),
@@ -127,19 +141,37 @@ export function SigwKeyForm({
 
 	return (
 		<Form onSubmit={submit}>
-			{issuing &&
-				me.providers.map((provider) => (
-					<ApiKeyInput
-						key={provider.id}
-						label={`${provider.label} の API キー`}
-						hint="空なら、このプロバイダは呼べません。登録したあとは、末尾4文字しか表示しません。"
-						apiKey={apiKeys[provider.id]?.apiKey ?? ""}
-						delegatedOnly={apiKeys[provider.id]?.delegatedOnly ?? false}
-						onChange={(next) =>
-							setApiKeys((current) => ({ ...current, [provider.id]: next }))
-						}
-					/>
-				))}
+			{apiKeyMode &&
+				me.providers.map((provider) => {
+					// 編集のときだけ、登録済みのキーを出す
+					const registered =
+						apiKeyMode === "edit"
+							? initial?.providerKeys.find(
+									(providerKey) => providerKey.provider === provider.id,
+								)
+							: undefined;
+					return (
+						<ApiKeyInput
+							key={provider.id}
+							label={`${provider.label} の API キー`}
+							hint={
+								registered
+									? "空のままなら、今のキーを使い続けます。入れると差し替え、今のキーは削除します。"
+									: "空なら、このプロバイダは呼べません。登録したあとは、末尾4文字しか表示しません。"
+							}
+							placeholder={
+								registered
+									? `末尾 ${registered.keyLast4}(${registered.ownerName})`
+									: undefined
+							}
+							apiKey={apiKeys[provider.id]?.apiKey ?? ""}
+							delegatedOnly={apiKeys[provider.id]?.delegatedOnly ?? false}
+							onChange={(next) =>
+								setApiKeys((current) => ({ ...current, [provider.id]: next }))
+							}
+						/>
+					);
+				})}
 			<Field label="目的">
 				{(id) => (
 					<Input
