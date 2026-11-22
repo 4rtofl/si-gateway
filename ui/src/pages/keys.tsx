@@ -261,6 +261,23 @@ export function KeysPage() {
 		}
 	};
 
+	const deleteProviderKey = async (key: ProviderKeyJson) => {
+		if (
+			!window.confirm(
+				`${key.label} を削除しますか？元には戻せません。このプロバイダキーは、結び付いたすべての sigw キーから外れます。`,
+			)
+		) {
+			return;
+		}
+		try {
+			await api(`/provider-keys/${key.id}/delete`, { method: "POST" });
+			toast("削除しました");
+			await Promise.all([providerKeys.reload(), sigwKeys.reload()]);
+		} catch (error) {
+			toast(error instanceof Error ? error.message : String(error), "error");
+		}
+	};
+
 	return (
 		<>
 			<PageHeader title="キー" />
@@ -307,15 +324,24 @@ export function KeysPage() {
 									</p>
 								</div>
 								{key.ownerId === me.user.id && (
-									<Button
-										variant={
-											key.disabledAt === null ? "destructive" : "secondary"
-										}
-										size="sm"
-										onClick={() => toggleProviderKey(key)}
-									>
-										{key.disabledAt === null ? "無効にする" : "有効に戻す"}
-									</Button>
+									<div className="flex items-center gap-2">
+										<Button
+											variant={
+												key.disabledAt === null ? "destructive" : "secondary"
+											}
+											size="sm"
+											onClick={() => toggleProviderKey(key)}
+										>
+											{key.disabledAt === null ? "無効にする" : "有効に戻す"}
+										</Button>
+										<Button
+											variant="destructive"
+											size="sm"
+											onClick={() => deleteProviderKey(key)}
+										>
+											削除
+										</Button>
+									</div>
 								)}
 							</li>
 						))}

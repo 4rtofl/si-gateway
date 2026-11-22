@@ -4,12 +4,12 @@ import type {
 	UsageOverviewJson,
 } from "@api/types.ts";
 import { useState } from "react";
-import { Link, useSearchParams } from "react-router";
+import { useSearchParams } from "react-router";
 import { useMe } from "@/app/me";
 import { useData } from "@/app/use-data";
 import { AnimatedTabs } from "@/components/ui/animated-tabs";
 import { Skeleton } from "@/components/ui/skeleton";
-import { EventsTable } from "@/parts/events";
+import { EventsTable, SigwKeyName, sigwKeyNames } from "@/parts/events";
 import { PageHeader, Section } from "@/parts/layout";
 import { UsageMatrix } from "@/parts/matrix";
 import { MonthNav } from "@/parts/month-nav";
@@ -21,13 +21,12 @@ export function UsagePage() {
 	const month = params.get("month") ?? me.month;
 	const [tab, setTab] = useState("user");
 	const overview = useData<UsageOverviewJson>(`/usage?month=${month}`);
-	const keys = useData<SigwKeyJson[]>("/sigw-keys");
+	// 削除した sigw キーも、使用量に名前を出す
+	const keys = useData<SigwKeyJson[]>("/sigw-keys?includeDeleted=1");
 	const events = useData<UsageEventJson[]>(
 		`/usage/events?month=${month}&limit=500`,
 	);
-	const purposes = new Map(
-		(keys.data ?? []).map((key) => [key.id, key.purpose]),
-	);
+	const purposes = sigwKeyNames(keys.data ?? []);
 
 	const content = () => {
 		if (!overview.data) return <Skeleton className="h-48 w-full" />;
@@ -44,9 +43,11 @@ export function UsagePage() {
 							id: row.sigwKeyId ?? "",
 							name: purposes.get(row.sigwKeyId ?? "") ?? row.sigwKeyId ?? "",
 							link: (
-								<Link to={`/keys/${row.sigwKeyId}`} className="hover:underline">
-									{purposes.get(row.sigwKeyId ?? "") ?? row.sigwKeyId}
-								</Link>
+								<SigwKeyName
+									id={row.sigwKeyId ?? ""}
+									keys={keys.data ?? []}
+									names={purposes}
+								/>
 							),
 						}))}
 					/>

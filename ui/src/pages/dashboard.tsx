@@ -38,7 +38,8 @@ export function DashboardPage() {
 	const previousMonth = shiftMonth(month, -1);
 	const current = useData<UsageOverviewJson>(`/usage?month=${month}`);
 	const previous = useData<UsageOverviewJson>(`/usage?month=${previousMonth}`);
-	const keys = useData<SigwKeyJson[]>("/sigw-keys");
+	// 削除した sigw キーも、最近の呼び出しに名前を出す
+	const keys = useData<SigwKeyJson[]>("/sigw-keys?includeDeleted=1");
 	const events = useData<UsageEventJson[]>(
 		`/usage/events?month=${month}&limit=15`,
 	);
@@ -96,6 +97,7 @@ export function DashboardPage() {
 	);
 	const activeKeys = keys.data.filter(
 		(key) =>
+			key.deletedAt === null &&
 			key.revokedAt === null &&
 			key.providerKeys.some((providerKey) => !providerKey.disabled),
 	);

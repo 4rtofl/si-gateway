@@ -429,14 +429,17 @@ export async function pollAgentSessions(
 	return counts;
 }
 
-/** プロバイダキーを復号して返す。無効にしたキーも使う(セッションの料金は、無効にしたあとも発生するため) */
+/**
+ * プロバイダキーを復号して返す。無効にしたキーも使う(セッションの料金は、無効にしたあとも発生するため)。
+ * 削除したキーは、暗号化したキーが消えているので読まない(セッションが動いているあいだは削除できない)
+ */
 async function loadApiKeys(
 	env: Env,
 	ids: string[],
 ): Promise<Map<string, string>> {
 	const keys = new Map<string, string>();
 	const { results } = await env.DB.prepare(
-		`SELECT id, encrypted_key FROM provider_keys WHERE id IN (${ids.map(() => "?").join(", ")})`,
+		`SELECT id, encrypted_key FROM provider_keys WHERE id IN (${ids.map(() => "?").join(", ")}) AND deleted_at IS NULL`,
 	)
 		.bind(...ids)
 		.all<{ id: string; encrypted_key: string }>();
