@@ -4,6 +4,12 @@
  */
 
 import {
+	decideCliLogin,
+	getCliLogin,
+	pollCliLogin,
+	startCliLogin,
+} from "../db/cli-logins.ts";
+import {
 	createProviderKey,
 	createSigwKey,
 	getSigwKey,
@@ -17,6 +23,7 @@ import {
 import {
 	createSession,
 	deleteCliToken,
+	deleteSessionByToken,
 	findSessionUser,
 	listCliTokens,
 } from "../db/sessions.ts";
@@ -42,6 +49,9 @@ import {
 } from "../settle/run.ts";
 import { allowedIds, sameOrigin, sessionUser } from "../web/auth.ts";
 import type {
+	CliLoginJson,
+	CliLoginPollJson,
+	CliLoginStartJson,
 	MeJson,
 	PriceInput,
 	SettlementPreviewJson,
@@ -122,6 +132,10 @@ export async function handleApi(
 	const url = new URL(request.url);
 	const path = url.pathname.slice("/api".length) || "/";
 	try {
+		const open = await publicRoute(request, env, path);
+		if (open) {
+			return open;
+		}
 		const auth = await authenticate(request, env);
 		if (!auth) {
 			return json({ error: "ログインしてください" }, 401);
@@ -158,6 +172,55 @@ export async function handleApi(
 			500,
 		);
 	}
+}
+
+/**
+ * ログインしていなくても呼べる API。CLI のブラウザでのログイン(sigw auth login)の始まりと問い合わせだけ。
+ * どちらも Cookie を使わないので、CSRF の心配はない
+ */
+async function publicRoute(
+	request: Request,
+	env: Env,
+	path: string,
+): Promise<Response | null> {
+	if (request.method !== "POST") {
+		return null;
+	}
+	if (path === "/cli-login/start") {
+		const input = await body<{ clientName?: string }>(request);
+		const started = await startCliLogin(
+			env.DB,
+			String(input.clientName ?? "").trim(),
+		);
+		const origin = new URL(request.url).origin;
+		return json({
+			deviceCode: started.deviceCode,
+			userCode: started.userCode,
+			verificationUrl: `${origin}/cli/login?code=${started.userCode}`,
+			expiresAt: started.expiresAt,
+			intervalMs: 2000,
+		} satisfies CliLoginStartJson);
+	}
+	if (path === "/cli-login/poll") {
+		const input = await body<{ deviceCode?: string }>(request);
+		const result = await pollCliLogin(env.DB, String(input.deviceCode ?? ""));
+		if (result.status !== "approved") {
+			return json({ status: result.status } satisfies CliLoginPollJson);
+		}
+		const user = (await listUsers(env.DB)).find(
+			(member) => member.id === result.userId,
+		);
+		return json({
+			status: "approved",
+			token: result.token,
+			userName: user?.name ?? result.userId,
+		} satisfies CliLoginPollJson);
+	}
+	return null;
+}
+
+function isLocal(url: URL): boolean {
+	return ["localhost", "127.0.0.1"].includes(url.hostname);
 }
 
 function monthParam(url: URL): string {
@@ -217,9 +280,10 @@ route("GET", "/me", async ({ env, user, url }): Promise<MeJson> => {
 		})),
 		// 手元(localhost)では、手元の Worker をそのまま使う
 		proxyOrigin:
-			env.PROXY_HOST && !["localhost", "127.0.0.1"].includes(url.hostname)
+			env.PROXY_HOST && !isLocal(url)
 				? `https://${env.PROXY_HOST}`
 				: url.origin,
+		cliOrigin: env.CLI_HOST && !isLocal(url) ? `https://${env.CLI_HOST}` : null,
 		month: monthOf(Date.now()),
 	};
 });
@@ -229,6 +293,41 @@ route("POST", "/me/personal-token", async ({ env, user }) => ({
 }));
 
 route("GET", "/cli-tokens", ({ env, user }) => listCliTokens(env.DB, user.id));
+
+// sigw auth logout。いま使っている CLI トークンを消す
+route("DELETE", "/cli-tokens/current", async ({ env, request }) => {
+	const bearer = request.headers
+		.get("authorization")
+		?.match(/^Bearer\s+(sgc_\S+)$/i)?.[1];
+	if (!bearer) {
+		throw badRequest("CLI トークンで呼んでください");
+	}
+	await deleteSessionByToken(env.DB, bearer);
+});
+
+// ---- CLI のブラウザでのログイン(Web UI の /cli/login から) ----
+
+route(
+	"GET",
+	"/cli-login/:code",
+	async ({ env, params }): Promise<CliLoginJson> => {
+		const login = await getCliLogin(env.DB, params.code ?? "");
+		if (!login) {
+			throw notFound(
+				"このコードは期限が切れたか、ありません。ターミナルでやり直してください",
+			);
+		}
+		return login;
+	},
+);
+
+route("POST", "/cli-login/:code/approve", async ({ env, user, params }) => {
+	await decideCliLogin(env.DB, params.code ?? "", user.id, true);
+});
+
+route("POST", "/cli-login/:code/deny", async ({ env, user, params }) => {
+	await decideCliLogin(env.DB, params.code ?? "", user.id, false);
+});
 
 route("POST", "/cli-tokens", async ({ env, user, request }) => {
 	const input = await body<{ label?: string }>(request);

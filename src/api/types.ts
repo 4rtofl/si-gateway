@@ -23,6 +23,8 @@ export interface MeJson {
 	providers: ProviderJson[];
 	/** LLM を呼び出すときのオリジン(クライアントの base URL に使う) */
 	proxyOrigin: string;
+	/** CLI のインストールスクリプトを配るオリジン。手元(localhost)では null */
+	cliOrigin: string | null;
 	/** 今月(日本時間) */
 	month: string;
 }
@@ -196,6 +198,29 @@ export interface CliTokenJson {
 	label: string | null;
 	createdAt: number;
 	lastUsedAt: number | null;
+}
+
+/** POST /api/cli-login/start(ログインしなくても呼べる) */
+export interface CliLoginStartJson {
+	deviceCode: string;
+	userCode: string;
+	/** ブラウザで開く画面 */
+	verificationUrl: string;
+	expiresAt: number;
+	intervalMs: number;
+}
+
+/** POST /api/cli-login/poll(ログインしなくても呼べる) */
+export type CliLoginPollJson =
+	| { status: "pending" | "denied" | "expired" }
+	| { status: "approved"; token: string; userName: string };
+
+/** GET /api/cli-login/:code(Web UI の許可の画面) */
+export interface CliLoginJson {
+	userCode: string;
+	clientName: string;
+	status: "pending" | "approved" | "denied";
+	expiresAt: number;
 }
 
 export interface ApiErrorJson {

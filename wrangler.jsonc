@@ -5,10 +5,16 @@
 	"main": "src/index.ts",
 	"compatibility_date": "2026-11-01",
 	// portal.sigw.4rtofl.org: Web UI と API。si.sigw.4rtofl.org: LLM の中継だけ(vars の PROXY_HOST)。
+	// cli.sigw.4rtofl.org: CLI のインストールスクリプト(vars の CLI_HOST)。
 	// 4rtofl.org は同じアカウントのゾーン。workers.dev でも引き続き使える
 	"routes": [
 		{ "pattern": "portal.sigw.4rtofl.org", "custom_domain": true },
-		{ "pattern": "si.sigw.4rtofl.org", "custom_domain": true }
+		{ "pattern": "si.sigw.4rtofl.org", "custom_domain": true },
+		{ "pattern": "cli.sigw.4rtofl.org", "custom_domain": true }
+	],
+	// CLI のインストールスクリプト(cli/install.sh など)を、文字列として Worker に入れる
+	"rules": [
+		{ "type": "Text", "globs": ["**/*.sh", "**/*.ps1"], "fallthrough": true }
 	],
 	"workers_dev": true,
 	// Web UI(ui/ を Vite でビルドしたもの)。中継だけのドメインで画面を出さないよう、すべてのリクエストを先に Worker が受ける
@@ -28,11 +34,15 @@
 		"enabled": true
 	},
 	"vars": {
-		// Web UI にログインできる Discord のユーザー ID(カンマ区切り)。Org のメンバー3人。
-		// Daichoo の台帳の payer_id / debtor_id と同じ ID を使う
 		// LLM の中継だけを受け付けるホスト。ここでは画面・API・ログインを出さない。
 		// 「設定」に出すクライアントの base URL も、このホストにする
 		"PROXY_HOST": "si.sigw.4rtofl.org",
+		// CLI のインストールスクリプトだけを配るホスト(src/web/cli-dist.ts)
+		"CLI_HOST": "cli.sigw.4rtofl.org",
+		// CLI のバイナリを置く GitHub Releases のリポジトリ(タグは cli-v0.1.0 の形)
+		"CLI_RELEASE_REPOSITORY": "4rtofl/si-gateway",
+		// Web UI にログインできる Discord のユーザー ID(カンマ区切り)。Org のメンバー3人。
+		// Daichoo の台帳の payer_id / debtor_id と同じ ID を使う
 		"ALLOWED_DISCORD_IDS": "1148088717907595324,687896063545180253,662108579658203206",
 		// Discord の OAuth2 の Client ID(sigw 専用の Discord アプリ。Web UI のログインだけに使う)
 		"DISCORD_CLIENT_ID": "1573772492173217794",

@@ -1,0 +1,97 @@
+# CLI のリリース。「cli-v0.1.0」の形のタグを push すると、各 OS のバイナリを Bun で作り、
+# GitHub Releases に SHA256SUMS と一緒に置く。cli/install.sh と sigw update は、ここからダウンロードする。
+name: Release CLI
+
+on:
+  push:
+    tags: ["cli-v*"]
+
+permissions:
+  contents: write
+
+env:
+  BUN_VERSION: 1.4.4
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          # x64 は古い CPU(AVX2 なし)でも動く baseline にする
+          - {
+              runner: ubuntu-latest,
+              target: linux-x64-baseline,
+              asset: sigw-linux-x64,
+            }
+          - {
+              runner: ubuntu-latest,
+              target: linux-arm64,
+              asset: sigw-linux-arm64,
+            }
+          - {
+              runner: ubuntu-latest,
+              target: linux-x64-musl-baseline,
+              asset: sigw-linux-x64-musl,
+            }
+          - {
+              runner: ubuntu-latest,
+              target: linux-arm64-musl,
+              asset: sigw-linux-arm64-musl,
+            }
+          - {
+              runner: ubuntu-latest,
+              target: windows-x64-baseline,
+              asset: sigw-windows-x64.exe,
+            }
+          # macOS 用は、Bun がアドホック署名を付けられるよう macOS で作る(署名がないと Apple シリコンで動かない)
+          - {
+              runner: macos-latest,
+              target: darwin-x64-baseline,
+              asset: sigw-darwin-x64,
+            }
+          - {
+              runner: macos-latest,
+              target: darwin-arm64,
+              asset: sigw-darwin-arm64,
+            }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - name: Build
+        run: |
+          version="${GITHUB_REF_NAME#cli-v}"
+          bun build cli/sigw.ts --compile --minify \
+            --target "bun-${{ matrix.target }}" \
+            --define "SIGW_VERSION=\"$version\"" \
+            --outfile "dist/${{ matrix.asset }}"
+      - name: Check
+        if: matrix.target == 'linux-x64-baseline' || matrix.target == 'darwin-arm64'
+        run: test "$(dist/${{ matrix.asset }} --version)" = "${GITHUB_REF_NAME#cli-v}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum sigw-* > SHA256SUMS && cat SHA256SUMS
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "sigw CLI ${GITHUB_REF_NAME#cli-v}" \
+            --notes "インストール: \`curl -fsSL https://cli.sigw.4rtofl.org/install.sh | sh\`(Windows は \`irm https://cli.sigw.4rtofl.org/install.ps1 | iex\`)。入れたあとは \`sigw update\` で更新できます。"

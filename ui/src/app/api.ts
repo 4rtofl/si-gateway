@@ -23,7 +23,10 @@ export async function api<T>(
 		body: init.body === undefined ? undefined : JSON.stringify(init.body),
 	});
 	if (response.status === 401) {
-		window.location.assign("/login");
+		const here = window.location.pathname + window.location.search;
+		window.location.assign(
+			here === "/" ? "/login" : `/login?next=${encodeURIComponent(here)}`,
+		);
 		throw new ApiError(401, "ログインしてください");
 	}
 	const data = (await response.json().catch(() => ({}))) as { error?: string };

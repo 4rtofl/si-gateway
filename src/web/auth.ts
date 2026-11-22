@@ -15,6 +15,12 @@ import { randomBase62 } from "../lib/crypto.ts";
 
 const SESSION_COOKIE = "sigw_session";
 const STATE_COOKIE = "sigw_oauth_state";
+const NEXT_COOKIE = "sigw_oauth_next";
+
+/** ログインのあとに戻るパス。同じサイトの中のパスだけを受け付ける(オープンリダイレクト対策) */
+function safeNext(value: string | null): string {
+	return value && /^\/(?![/\\])/.test(value) ? value : "/";
+}
 
 export function allowedIds(env: Env): Set<string> {
 	return new Set(
@@ -89,13 +95,22 @@ export function startLogin(request: Request, env: Env): Response {
 	url.searchParams.set("scope", "identify");
 	url.searchParams.set("state", state);
 	url.searchParams.set("prompt", "none");
-	return new Response(null, {
-		status: 302,
-		headers: {
-			Location: url.toString(),
-			"Set-Cookie": cookie(request, STATE_COOKIE, state, 600, "/auth"),
-		},
-	});
+	const headers = new Headers({ Location: url.toString() });
+	headers.append(
+		"Set-Cookie",
+		cookie(request, STATE_COOKIE, state, 600, "/auth"),
+	);
+	headers.append(
+		"Set-Cookie",
+		cookie(
+			request,
+			NEXT_COOKIE,
+			safeNext(new URL(request.url).searchParams.get("next")),
+			600,
+			"/auth",
+		),
+	);
+	return new Response(null, { status: 302, headers });
 }
 
 interface DiscordUser {
@@ -158,12 +173,15 @@ export async function finishLogin(
 		avatar: discordUser.avatar ?? null,
 	});
 	const session = await createSession(env.DB, discordUser.id, "web");
-	const headers = new Headers({ Location: "/" });
+	const headers = new Headers({
+		Location: safeNext(readCookie(request, NEXT_COOKIE)),
+	});
 	headers.append(
 		"Set-Cookie",
 		cookie(request, SESSION_COOKIE, session, WEB_SESSION_TTL_MS / 1000),
 	);
 	headers.append("Set-Cookie", cookie(request, STATE_COOKIE, "", 0, "/auth"));
+	headers.append("Set-Cookie", cookie(request, NEXT_COOKIE, "", 0, "/auth"));
 	return new Response(null, { status: 302, headers });
 }
 

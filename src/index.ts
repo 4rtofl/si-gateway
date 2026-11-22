@@ -5,6 +5,7 @@
  * - /auth/*: Discord でのログイン(src/web/auth.ts)
  * - それ以外: Web UI(ui/ をビルドしたもの。Static Assets が返す)
  * PROXY_HOST(si.sigw.4rtofl.org)では中継だけを受け付け、ほかのパスは 404 にする。
+ * CLI_HOST(cli.sigw.4rtofl.org)では、CLI のインストールスクリプトだけを配る(src/web/cli-dist.ts)。
  */
 
 import { handleApi } from "./api/router.ts";
@@ -15,10 +16,14 @@ import { handleProxy } from "./proxy/handler.ts";
 import { matchProviderPath } from "./proxy/providers.ts";
 import { getSettlement, runSettlement } from "./settle/run.ts";
 import { finishLogin, logout, startLogin } from "./web/auth.ts";
+import { handleCliHost } from "./web/cli-dist.ts";
 
 export default {
 	async fetch(request, env, ctx): Promise<Response> {
 		const url = new URL(request.url);
+		if (env.CLI_HOST && url.hostname === env.CLI_HOST) {
+			return handleCliHost(request, env, ctx);
+		}
 		const provider = matchProviderPath(url.pathname);
 		if (provider) {
 			return handleProxy(

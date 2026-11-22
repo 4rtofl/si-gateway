@@ -6,6 +6,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { MeProvider } from "./app/me.tsx";
 import { Shell } from "./app/shell.tsx";
 import { ToastProvider } from "./app/toast.tsx";
+import { CliLoginPage } from "./pages/cli-login.tsx";
 import { DashboardPage } from "./pages/dashboard.tsx";
 import { KeyDetailPage } from "./pages/key-detail.tsx";
 import { KeysPage } from "./pages/keys.tsx";
@@ -33,6 +34,14 @@ if (root) {
 				<ToastProvider>
 					<Routes>
 						<Route path="/login" element={<LoginPage />} />
+						<Route
+							path="/cli/login"
+							element={
+								<MeProvider fallback={<Loading />}>
+									<CliLoginPage />
+								</MeProvider>
+							}
+						/>
 						<Route
 							element={
 								<MeProvider fallback={<Loading />}>

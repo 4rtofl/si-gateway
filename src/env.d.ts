@@ -6,3 +6,14 @@ interface Env {
 	 */
 	UPSTREAM_OVERRIDE?: string;
 }
+
+/** wrangler.jsonc の rules で、文字列として読み込むファイル */
+declare module "*.sh" {
+	const text: string;
+	export default text;
+}
+
+declare module "*.ps1" {
+	const text: string;
+	export default text;
+}
