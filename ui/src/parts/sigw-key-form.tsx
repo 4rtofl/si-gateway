@@ -7,11 +7,19 @@ import { DatePicker } from "@/components/ui/date-picker";
 import { Form, Input, Select, Textarea } from "@/components/ui/form";
 import { Field } from "./field.tsx";
 
+/** プロバイダキーを選ぶときの表示。「メイン(あま) · 代理専用」 */
+export function providerKeyOptionLabel(key: ProviderKeyJson): string {
+	return `${key.label}(${key.ownerName})${key.delegatedOnly ? " · 代理専用" : ""}`;
+}
+
 function initialDate(ms: number | null | undefined): Date | null {
 	return ms ? new Date(ms) : null;
 }
 
-/** sigw キーの発行と変更に使うフォーム。providerKeys を渡すと、プロバイダキーを選べる(発行のとき) */
+/**
+ * sigw キーの発行と変更に使うフォーム。providerKeys を渡すと、プロバイダキーを選べる(発行のとき)。
+ * プロバイダキーは、プロバイダごとに1つずつ選ぶ。発行したあとの足し外しは、キーの詳細の画面でする
+ */
 export function SigwKeyForm({
 	initial,
 	providerKeys,
@@ -24,11 +32,15 @@ export function SigwKeyForm({
 	onSubmit: (input: SigwKeyInput) => Promise<void>;
 }) {
 	const { me } = useMe();
-	const providerLabel = (id: string) =>
-		me.providers.find((provider) => provider.id === id)?.label ?? id;
-	const [providerKeyId, setProviderKeyId] = useState(
-		providerKeys?.[0]?.id ?? "",
+	// プロバイダごとの選択。空の文字列は「使わない」。最初は、最初のプロバイダキーだけを選んでおく
+	const providers = me.providers.filter((provider) =>
+		providerKeys?.some((key) => key.provider === provider.id),
 	);
+	const [selected, setSelected] = useState<Record<string, string>>(() => {
+		const first = providerKeys?.[0];
+		return first ? { [first.provider]: first.id } : {};
+	});
+	const providerKeyIds = Object.values(selected).filter((id) => id !== "");
 	const [purpose, setPurpose] = useState(initial?.purpose ?? "");
 	const [models, setModels] = useState(
 		initial?.allowedModels?.join("\n") ?? "",
@@ -46,7 +58,7 @@ export function SigwKeyForm({
 		setBusy(true);
 		try {
 			await onSubmit({
-				providerKeyId: providerKeys ? providerKeyId : undefined,
+				providerKeyIds: providerKeys ? providerKeyIds : undefined,
 				purpose,
 				allowedModels: models.split(/[\s,]+/).filter((value) => value !== ""),
 				monthlyLimitUsd: limit.trim() === "" ? null : Number(limit),
@@ -59,21 +71,32 @@ export function SigwKeyForm({
 
 	return (
 		<Form onSubmit={submit}>
-			{providerKeys && (
-				<Field label="プロバイダキー">
-					{(id) => (
-						<Select
-							id={id}
-							value={providerKeyId}
-							onChange={(event) => setProviderKeyId(event.target.value)}
-							options={providerKeys.map((key) => ({
-								value: key.id,
-								label: `${providerLabel(key.provider)} · ${key.label}(${key.ownerName})${key.delegatedOnly ? " · 代理専用" : ""}`,
-							}))}
-						/>
-					)}
-				</Field>
-			)}
+			{providerKeys &&
+				providers.map((provider) => (
+					<Field key={provider.id} label={`${provider.label} のプロバイダキー`}>
+						{(id) => (
+							<Select
+								id={id}
+								value={selected[provider.id] ?? ""}
+								onChange={(event) =>
+									setSelected((current) => ({
+										...current,
+										[provider.id]: event.target.value,
+									}))
+								}
+								options={[
+									{ value: "", label: "使わない" },
+									...providerKeys
+										.filter((key) => key.provider === provider.id)
+										.map((key) => ({
+											value: key.id,
+											label: providerKeyOptionLabel(key),
+										})),
+								]}
+							/>
+						)}
+					</Field>
+				))}
 			<Field label="目的">
 				{(id) => (
 					<Input
@@ -140,7 +163,7 @@ export function SigwKeyForm({
 				type="submit"
 				isLoading={busy}
 				fullWidth
-				disabled={providerKeys !== undefined && providerKeyId === ""}
+				disabled={providerKeys !== undefined && providerKeyIds.length === 0}
 			>
 				{submitLabel}
 			</Button>

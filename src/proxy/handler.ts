@@ -20,13 +20,14 @@ import {
 	type Credential,
 	DELEGATED_USER_HEADER,
 	type KeyInfo,
+	type ProviderKeyInfo,
 	parseCredential,
 	parseDelegatedSigwToken,
 	parseDelegatedUser,
 	resolveCredential,
 } from "./auth.ts";
 import { modelAllowed } from "./models.ts";
-import { isBlockedPath, type ProviderSpec } from "./providers.ts";
+import { isBlockedPath, PROVIDER_IDS, type ProviderSpec } from "./providers.ts";
 import {
 	collectFromJson,
 	collectFromSse,
@@ -270,7 +271,7 @@ export async function handleProxy(
 	}
 	const resolved = await resolveCredential(env, ctx, credential, startedAt);
 	const key = resolved.key;
-	if (!key || key.disabled) {
+	if (!key || key.revoked) {
 		return errorResponse(
 			provider,
 			401,
@@ -288,22 +289,33 @@ export async function handleProxy(
 			"authentication_error",
 		);
 	}
-	// 代理専用のプロバイダキーのワークスペースには、Bobert の利用者ごとの Vault がある。
-	// 公開の入口から使えると、ほかの人の Vault を付けたセッションを作れてしまうので断る
-	if (key.delegatedOnly && entry !== "bobert") {
-		return errorResponse(
-			provider,
-			403,
-			"この sigw キーは、Bobert からの代理の呼び出しでしか使えません",
-			"permission_error",
-		);
-	}
-	if (key.provider !== provider.id) {
+	// パスのプロバイダに結び付いたプロバイダキーを使う。ほかのプロバイダの設定(無効、代理専用)は見ない
+	const providerKey = key.providers[provider.id];
+	if (!providerKey) {
+		const linked = PROVIDER_IDS.filter((id) => key.providers[id]);
 		return errorResponse(
 			provider,
 			400,
-			`この sigw キーは ${key.provider} 用です。base URL を /${key.provider} にしてください`,
+			`この sigw キーには ${provider.label} のプロバイダキーがありません${linked.length > 0 ? `。この sigw キーで呼べるのは ${linked.map((id) => `/${id}`).join("、")} です` : ""}`,
 			"invalid_request_error",
+		);
+	}
+	if (providerKey.disabled) {
+		return errorResponse(
+			provider,
+			401,
+			`この sigw キーの ${provider.label} のプロバイダキーは無効になっています`,
+			"authentication_error",
+		);
+	}
+	// 代理専用のプロバイダキーのワークスペースには、Bobert の利用者ごとの Vault がある。
+	// 公開の入口から使えると、ほかの人の Vault を付けたセッションを作れてしまうので断る
+	if (providerKey.delegatedOnly && entry !== "bobert") {
+		return errorResponse(
+			provider,
+			403,
+			`この sigw キーの ${provider.label} のプロバイダキーは、Bobert からの代理の呼び出しでしか使えません`,
+			"permission_error",
 		);
 	}
 	if (key.expiresAt !== null && key.expiresAt <= startedAt) {
@@ -352,6 +364,7 @@ export async function handleProxy(
 	const meta: MeterContext = {
 		env,
 		key,
+		providerKey,
 		userId: resolved.userId,
 		month: resolved.month,
 		provider,
@@ -377,7 +390,7 @@ export async function handleProxy(
 		agentSessionId !== null && isSessionDelete(request.method, upstreamPath);
 	if (agentSessionId && deletesAgentSession) {
 		await finalizeBeforeDelete(
-			{ env, origin, apiKey: key.apiKey },
+			{ env, origin, apiKey: providerKey.apiKey },
 			ctx,
 			agentSessionId,
 			startedAt,
@@ -388,7 +401,7 @@ export async function handleProxy(
 	try {
 		upstream = await fetch(`${origin}${upstreamPath}${search}`, {
 			method: request.method,
-			headers: upstreamHeaders(request, provider, key.apiKey),
+			headers: upstreamHeaders(request, provider, providerKey.apiKey),
 			body: prepared.body,
 			redirect: "manual",
 		});
@@ -452,6 +465,8 @@ export async function handleProxy(
 interface MeterContext {
 	env: Env;
 	key: KeyInfo;
+	/** パスのプロバイダに結び付いた、この呼び出しで使うプロバイダキー */
+	providerKey: ProviderKeyInfo;
 	userId: string;
 	month: string;
 	provider: ProviderSpec;
@@ -501,8 +516,8 @@ async function meter(
 				await recordCreatedSession(meta.env, text, {
 					userId: meta.userId,
 					sigwKeyId: meta.key.sigwKeyId,
-					providerKeyId: meta.key.providerKeyId,
-					ownerId: meta.key.ownerId,
+					providerKeyId: meta.providerKey.providerKeyId,
+					ownerId: meta.providerKey.ownerId,
 					anthropicBeta: meta.anthropicBeta,
 					via: meta.via,
 					now: meta.startedAt,
@@ -567,8 +582,8 @@ async function record(
 		createdAt: meta.startedAt,
 		userId: meta.userId,
 		sigwKeyId: meta.key.sigwKeyId,
-		providerKeyId: meta.key.providerKeyId,
-		ownerId: meta.key.ownerId,
+		providerKeyId: meta.providerKey.providerKeyId,
+		ownerId: meta.providerKey.ownerId,
 		provider: meta.provider.id,
 		method: meta.method,
 		path: meta.path,

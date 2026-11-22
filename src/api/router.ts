@@ -10,11 +10,13 @@ import {
 	startCliLogin,
 } from "../db/cli-logins.ts";
 import {
+	addSigwKeyProvider,
 	createProviderKey,
 	createSigwKey,
 	getSigwKey,
 	listProviderKeys,
 	listSigwKeys,
+	removeSigwKeyProvider,
 	revokeSigwKey,
 	type SigwKeySettings,
 	setProviderKeyEnabled,
@@ -395,12 +397,14 @@ route("GET", "/sigw-keys", ({ env }) =>
 
 route("POST", "/sigw-keys", async ({ env, user, request }) => {
 	const input = await body<SigwKeyInput>(request);
-	if (!input.providerKeyId) {
-		throw badRequest("プロバイダキーを選んでください");
-	}
+	const providerKeyIds = Array.isArray(input.providerKeyIds)
+		? input.providerKeyIds.map(String)
+		: input.providerKeyId
+			? [String(input.providerKeyId)]
+			: [];
 	return createSigwKey(env.DB, {
 		...sigwKeySettings(input),
-		providerKeyId: input.providerKeyId,
+		providerKeyIds,
 		createdBy: user.id,
 	});
 });
@@ -420,6 +424,37 @@ route("PATCH", "/sigw-keys/:id", async ({ env, user, params, request }) => {
 	const input = await body<SigwKeyInput>(request);
 	await updateSigwKey(env.DB, params.id ?? "", user.id, sigwKeySettings(input));
 });
+
+// 発行したあとで、プロバイダキーを足す・外す(プロバイダごとに1つまで)
+route(
+	"POST",
+	"/sigw-keys/:id/provider-keys",
+	async ({ env, user, params, request }) => {
+		const input = await body<{ providerKeyId?: string }>(request);
+		if (!input.providerKeyId) {
+			throw badRequest("プロバイダキーを選んでください");
+		}
+		await addSigwKeyProvider(
+			env.DB,
+			params.id ?? "",
+			user.id,
+			String(input.providerKeyId),
+		);
+	},
+);
+
+route(
+	"DELETE",
+	"/sigw-keys/:id/provider-keys/:providerKeyId",
+	async ({ env, user, params }) => {
+		await removeSigwKeyProvider(
+			env.DB,
+			params.id ?? "",
+			user.id,
+			params.providerKeyId ?? "",
+		);
+	},
+);
 
 route("DELETE", "/sigw-keys/:id", async ({ env, user, params }) => {
 	if (!(await getSigwKey(env.DB, params.id ?? ""))) {
