@@ -71,8 +71,9 @@ const HELP = `sigw の CLI ${VERSION}
   personal-token                      個人トークンを発行し直す
 
   provider-keys                       プロバイダキーの一覧
-  provider-keys add --provider <openai|anthropic|xai|openrouter> [--label 名前]
-                                      プロバイダキーを登録する(キーは標準入力から読む)
+  provider-keys add --provider <openai|anthropic|xai|openrouter> [--label 名前] [--delegated-only]
+                                      プロバイダキーを登録する(キーは標準入力から読む)。
+                                      --delegated-only: 代理専用(Bobert からの呼び出しでだけ使える)
   provider-keys disable|enable <ID>   プロバイダキーを無効にする・有効に戻す
 
   keys                                sigw キーの一覧
@@ -488,7 +489,7 @@ function printEvents(
 		],
 		events.map((event) => [
 			date(event.createdAt),
-			names.get(event.userId) ?? event.userId,
+			`${names.get(event.userId) ?? event.userId}${event.via === "bobert" ? "(Bobert)" : ""}`,
 			event.model ?? event.path,
 			event.incomplete ? `${event.status}(途中)` : String(event.status),
 			event.inputTokens,
@@ -543,6 +544,7 @@ async function main(): Promise<void> {
 			"cache-write": { type: "string" },
 			url: { type: "string" },
 			"with-token": { type: "boolean" },
+			"delegated-only": { type: "boolean" },
 			"no-browser": { type: "boolean" },
 			help: { type: "boolean", short: "h" },
 			version: { type: "boolean", short: "v" },
@@ -644,7 +646,12 @@ async function main(): Promise<void> {
 						k.keyHint,
 						k.ownerName,
 						k.activeSigwKeys,
-						k.disabledAt === null ? "有効" : "無効",
+						[
+							k.disabledAt === null ? "有効" : "無効",
+							k.delegatedOnly ? "代理専用" : "",
+						]
+							.filter(Boolean)
+							.join("・"),
 					]),
 				);
 				return;
@@ -656,6 +663,7 @@ async function main(): Promise<void> {
 					provider,
 					label: opt(values, "label") ?? "",
 					apiKey,
+					delegatedOnly: values["delegated-only"] === true,
 				});
 				console.log(`登録しました: ${id}`);
 				return;

@@ -6,12 +6,15 @@
  * - それ以外: Web UI(ui/ をビルドしたもの。Static Assets が返す)
  * PROXY_HOST(si.sigw.4rtofl.org)では中継だけを受け付け、ほかのパスは 404 にする。
  * CLI_HOST(cli.sigw.4rtofl.org)では、CLI のインストールスクリプトだけを配る(src/web/cli-dist.ts)。
+ * 名前付きのエントリポイント BobertGateway は、Bobert からの Service Binding だけが呼べる代理の入口(src/proxy/bobert.ts)。
  */
 
+import { WorkerEntrypoint } from "cloudflare:workers";
 import { handleApi } from "./api/router.ts";
 import { purgeExpiredSessions } from "./db/sessions.ts";
 import { jstDayAndHour, monthOf, previousMonth } from "./lib/time.ts";
 import { repriceUnpriced, syncLiteLlmPrices } from "./pricing/store.ts";
+import { handleBobertRequest } from "./proxy/bobert.ts";
 import { handleProxy } from "./proxy/handler.ts";
 import { matchProviderPath } from "./proxy/providers.ts";
 import { getSettlement, runSettlement } from "./settle/run.ts";
@@ -62,6 +65,17 @@ export default {
 		ctx.waitUntil(runScheduled(env, controller.scheduledTime));
 	},
 } satisfies ExportedHandler<Env>;
+
+/**
+ * Bobert からの代理の呼び出しの入口。Bobert の wrangler.jsonc の
+ * services: [{ binding: "SIGW", service: "sigw", entrypoint: "BobertGateway" }] から呼ぶ。
+ * 名前付きのエントリポイントは公開のドメインからは届かないので、Service Binding からしか呼べない
+ */
+export class BobertGateway extends WorkerEntrypoint<Env> {
+	override async fetch(request: Request): Promise<Response> {
+		return handleBobertRequest(request, this.env, this.ctx);
+	}
+}
 
 /**
  * 毎日 0:05・3:05・6:05(日本時間)に動く。

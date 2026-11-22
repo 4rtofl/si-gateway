@@ -45,6 +45,12 @@ export OPENAI_API_KEY=sgk_xxxx.sgu_yyyy
 - 各プロバイダの API をそのまま中継するので、SDK もプロバイダ固有の機能も、そのまま使えます
 - バッチ API と Realtime API は、使用量を記録できないので使えません
 
+### Bobert から使う
+
+[Bobert](https://github.com/4rtofl/Bobert) は、Service Binding(`entrypoint: "BobertGateway"`)で sigw を呼びます。sigw キー(`sgk_…`)と、利用者の Discord ID(`x-sigw-user`)を渡すので、個人トークンは要りません。呼び出しの一覧には「Bobert」の印が付きます。
+
+プロバイダキーを登録するときに「代理専用」にすると、それにつながる sigw キーは Bobert からしか使えなくなります。Bobert のエージェントが、利用者の GitHub のトークンを置くワークスペースのキーは、代理専用にしてください。詳しくは [docs/design.md](docs/design.md) の「4.5」にあります。
+
 ### 4. 精算
 
 毎月1日の0時5分(日本時間)に、前の月の分を「使った人 → キーの持ち主」ごとに合計し、円にして Daichoo の台帳(`ledger/YYYY-MM.tsv`)に書き込みます。自分のキーを自分で使った分は請求しません。為替レートは、そのときの USD/JPY を取得し、台帳の memo に残します。

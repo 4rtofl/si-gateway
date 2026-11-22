@@ -39,6 +39,8 @@ export interface ProviderKeyJson {
 	createdAt: number;
 	disabledAt: number | null;
 	activeSigwKeys: number;
+	/** 代理専用。これにつながる sigw キーは、Bobert からの代理の呼び出しでしか使えない */
+	delegatedOnly: boolean;
 }
 
 export interface SigwKeyJson {
@@ -122,6 +124,8 @@ export interface UsageEventJson {
 	ttfbMs: number | null;
 	durationMs: number | null;
 	error: string | null;
+	/** 代理の呼び出し(Bobert から)なら 'bobert'、公開の入口なら null */
+	via: string | null;
 }
 
 export interface SettlementLineJson {

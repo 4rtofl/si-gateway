@@ -1,6 +1,7 @@
 /*
  * プロバイダキーと sigw キー。
  * - プロバイダキーは、所有者だけが無効にできる。キーそのものは暗号化して保存し、画面には末尾4文字だけ出す
+ * - 代理専用のプロバイダキーは、登録するときに決める。あとから公開の入口で使えるようにはしない
  * - sigw キーは誰でも発行できる。変更と無効化は、発行した人とプロバイダキーの所有者ができる
  */
 
@@ -26,12 +27,14 @@ export interface ProviderKey {
 	disabledAt: number | null;
 	/** 有効な sigw キーの数 */
 	activeSigwKeys: number;
+	/** 代理専用。これにつながる sigw キーは、BobertGateway からしか使えない */
+	delegatedOnly: boolean;
 }
 
 export async function listProviderKeys(db: D1Database): Promise<ProviderKey[]> {
 	const { results } = await db
 		.prepare(
-			`SELECT p.id, p.owner_id, u.name AS owner_name, p.provider, p.label, p.key_hint, p.created_at, p.disabled_at,
+			`SELECT p.id, p.owner_id, u.name AS owner_name, p.provider, p.label, p.key_hint, p.created_at, p.disabled_at, p.delegated_only,
 				(SELECT COUNT(*) FROM sigw_keys s WHERE s.provider_key_id = p.id AND s.revoked_at IS NULL) AS active_sigw_keys
 			 FROM provider_keys p JOIN users u ON u.id = p.owner_id
 			 ORDER BY p.disabled_at IS NOT NULL, p.created_at`,
@@ -45,6 +48,7 @@ export async function listProviderKeys(db: D1Database): Promise<ProviderKey[]> {
 			key_hint: string;
 			created_at: number;
 			disabled_at: number | null;
+			delegated_only: number;
 			active_sigw_keys: number;
 		}>();
 	return results.map((row) => ({
@@ -57,6 +61,7 @@ export async function listProviderKeys(db: D1Database): Promise<ProviderKey[]> {
 		createdAt: row.created_at,
 		disabledAt: row.disabled_at,
 		activeSigwKeys: row.active_sigw_keys,
+		delegatedOnly: row.delegated_only === 1,
 	}));
 }
 
@@ -65,6 +70,8 @@ export interface NewProviderKey {
 	provider: string;
 	label: string;
 	apiKey: string;
+	/** 代理専用にする(BobertGateway からだけ使える)。登録したあとは変えられない */
+	delegatedOnly?: boolean;
 }
 
 export async function createProviderKey(
@@ -86,7 +93,7 @@ export async function createProviderKey(
 	const id = newId();
 	await db
 		.prepare(
-			"INSERT INTO provider_keys (id, owner_id, provider, label, encrypted_key, key_hint, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+			"INSERT INTO provider_keys (id, owner_id, provider, label, encrypted_key, key_hint, created_at, delegated_only) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
 		)
 		.bind(
 			id,
@@ -96,6 +103,7 @@ export async function createProviderKey(
 			await encryptText(encryptionSecret, apiKey),
 			`…${apiKey.slice(-4)}`,
 			Date.now(),
+			input.delegatedOnly ? 1 : 0,
 		)
 		.run();
 	return id;

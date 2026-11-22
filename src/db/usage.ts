@@ -27,6 +27,8 @@ export interface UsageEventInput {
 	durationMs: number;
 	upstreamRequestId: string | null;
 	error: string | null;
+	/** 代理の呼び出し(BobertGateway)なら 'bobert'、公開の入口なら null */
+	via: "bobert" | null;
 }
 
 export async function insertUsageEvent(
@@ -37,8 +39,8 @@ export async function insertUsageEvent(
 		.prepare(
 			`INSERT INTO usage_events (id, month, created_at, user_id, sigw_key_id, provider_key_id, owner_id, provider, method, path,
 				model, stream, status, input_tokens, cache_read_tokens, cache_write_tokens, cache_write_1h_tokens, output_tokens,
-				service_tier, cost_nano_usd, cost_source, incomplete, ttfb_ms, duration_ms, upstream_request_id, error)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				service_tier, cost_nano_usd, cost_source, incomplete, ttfb_ms, duration_ms, upstream_request_id, error, via)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		)
 		.bind(
 			newId(),
@@ -67,6 +69,7 @@ export async function insertUsageEvent(
 			event.durationMs,
 			event.upstreamRequestId,
 			event.error ? event.error.slice(0, 500) : null,
+			event.via,
 		)
 		.run();
 }
@@ -183,6 +186,8 @@ export interface UsageEvent {
 	ttfbMs: number | null;
 	durationMs: number | null;
 	error: string | null;
+	/** 代理の呼び出しなら 'bobert'、公開の入口なら null */
+	via: string | null;
 }
 
 export interface UsageEventFilter {
@@ -240,6 +245,7 @@ export async function listUsageEvents(
 		ttfbMs: row.ttfb_ms === null ? null : Number(row.ttfb_ms),
 		durationMs: row.duration_ms === null ? null : Number(row.duration_ms),
 		error: row.error === null ? null : String(row.error),
+		via: row.via == null ? null : String(row.via),
 	}));
 }
 
