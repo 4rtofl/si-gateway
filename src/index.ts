@@ -14,9 +14,10 @@ import { handleApi } from "./api/router.ts";
 import { purgeExpiredSessions } from "./db/sessions.ts";
 import { jstDayAndHour, monthOf, previousMonth } from "./lib/time.ts";
 import { repriceUnpriced, syncLiteLlmPrices } from "./pricing/store.ts";
+import { pollAgentSessions } from "./proxy/agent-sessions.ts";
 import { handleBobertRequest } from "./proxy/bobert.ts";
-import { handleProxy } from "./proxy/handler.ts";
-import { matchProviderPath } from "./proxy/providers.ts";
+import { handleProxy, upstreamOrigin } from "./proxy/handler.ts";
+import { matchProviderPath, PROVIDERS } from "./proxy/providers.ts";
 import { getSettlement, runSettlement } from "./settle/run.ts";
 import { finishLogin, logout, startLogin } from "./web/auth.ts";
 import { handleCliHost } from "./web/cli-dist.ts";
@@ -62,9 +63,35 @@ export default {
 	},
 
 	async scheduled(controller, env, ctx): Promise<void> {
+		if (controller.cron === AGENT_SESSIONS_CRON) {
+			ctx.waitUntil(runAgentSessionsPoll(env, controller.scheduledTime));
+			return;
+		}
 		ctx.waitUntil(runScheduled(env, controller.scheduledTime));
 	},
 } satisfies ExportedHandler<Env>;
+
+/** Managed Agents のセッションを読む Cron。wrangler.jsonc の triggers.crons と同じ文字列にする */
+export const AGENT_SESSIONS_CRON = "*/5 * * * *";
+
+/** 5分ごとに動く。Managed Agents のセッションの使用量を読み、増えた分を記録する(docs/design.md 5.3) */
+export async function runAgentSessionsPoll(
+	env: Env,
+	now: number,
+): Promise<void> {
+	try {
+		const counts = await pollAgentSessions(
+			env,
+			upstreamOrigin(env, PROVIDERS.anthropic),
+			now,
+		);
+		if (counts.recorded + counts.terminated + counts.not_found + counts.error) {
+			console.log("Managed Agents のセッションを読みました", counts);
+		}
+	} catch (error) {
+		console.error("Managed Agents のセッションを読めませんでした", error);
+	}
+}
 
 /**
  * Bobert からの代理の呼び出しの入口。Bobert の wrangler.jsonc の
