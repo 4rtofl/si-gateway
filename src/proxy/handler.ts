@@ -390,7 +390,12 @@ export async function handleProxy(
 		agentSessionId !== null && isSessionDelete(request.method, upstreamPath);
 	if (agentSessionId && deletesAgentSession) {
 		await finalizeBeforeDelete(
-			{ env, origin, apiKey: providerKey.apiKey },
+			{
+				env,
+				origin,
+				apiKey: providerKey.apiKey,
+				providerKeyId: providerKey.providerKeyId,
+			},
 			ctx,
 			agentSessionId,
 			startedAt,
@@ -419,7 +424,12 @@ export async function handleProxy(
 	if (agentSessionId) {
 		ctx.waitUntil(
 			(deletesAgentSession
-				? afterSessionDelete(env, agentSessionId, upstream.status)
+				? afterSessionDelete(
+						env,
+						agentSessionId,
+						upstream.status,
+						providerKey.providerKeyId,
+					)
 				: touchAgentSession(env.DB, agentSessionId, startedAt)
 			).catch((error) => {
 				console.error("セッションの記録を更新できませんでした", error);

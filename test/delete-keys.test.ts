@@ -1,16 +1,18 @@
 /*
- * プロバイダキーと sigw キーの削除(migrations/0008、docs/design.md 3.3)。
+ * キーの削除(migrations/0008、0009、docs/design.md 3.3)。
  * 秘密の値を消して行を残すこと、一覧から消えること、中継と BobertGateway で使えなくなること、
- * 動いているエージェントのセッションがあると断ること、使用量に名前が残ること
+ * 動いているエージェントのセッションがあっても断らず、セッションが終わってから Cron が暗号化したキーを消すこと、
+ * 使用量に名前が残ること、0009 で結び付いていないプロバイダキーを削除すること
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { handleApi } from "../src/api/router.ts";
-import type {
-	ProviderKeyJson,
-	SigwKeyJson,
-	UsageOverviewJson,
-} from "../src/api/types.ts";
+import type { SigwKeyJson, UsageOverviewJson } from "../src/api/types.ts";
+import {
+	purgeDeletedProviderKeys,
+	removeSigwKeyProvider,
+	setSigwKeyProvider,
+} from "../src/db/keys.ts";
 import { createSession } from "../src/db/sessions.ts";
 import { encryptText, sha256Hex } from "../src/lib/crypto.ts";
 import { monthOf } from "../src/lib/time.ts";
@@ -29,8 +31,6 @@ const U1 = "100000000000000001";
 const U2 = "100000000000000002";
 const U3 = "100000000000000003";
 const U4 = "100000000000000004";
-const SESSION_MESSAGE =
-	"このプロバイダキーで動いているエージェントのセッションがあります。セッションが終わってから削除してください。";
 
 function fakeCtx() {
 	const pending: Promise<unknown>[] = [];
@@ -43,14 +43,40 @@ function fakeCtx() {
 }
 
 let upstreamCalls: string[] = [];
+/** 呼び出しごとの、プロバイダに渡したキー(x-api-key か Authorization) */
+let upstreamKeys: string[] = [];
+/** DELETE /v1/sessions/{id} に返すステータス */
+let sessionDeleteStatus = 200;
 
 beforeEach(() => {
 	clearAuthCache();
 	upstreamCalls = [];
+	upstreamKeys = [];
+	sessionDeleteStatus = 200;
 	vi.stubGlobal(
 		"fetch",
-		vi.fn(async (url: string) => {
+		vi.fn(async (url: string, init?: RequestInit) => {
 			upstreamCalls.push(url);
+			const headers = new Headers(init?.headers);
+			upstreamKeys.push(
+				headers.get("x-api-key") ??
+					headers.get("authorization")?.replace(/^Bearer /, "") ??
+					"",
+			);
+			// Managed Agents のセッション(GET /v1/sessions/{id})
+			const session = url.match(/\/v1\/sessions\/([\w-]+)$/)?.[1];
+			if (session && init?.method === "DELETE") {
+				return Response.json({}, { status: sessionDeleteStatus });
+			}
+			if (session) {
+				return Response.json({
+					type: "session",
+					id: session,
+					status: "running",
+					agent: { model: { id: "claude-sonnet-4-5" } },
+					usage: { input_tokens: 100, output_tokens: 10 },
+				});
+			}
 			return Response.json(
 				{ model: "m", usage: { input_tokens: 10, output_tokens: 5 } },
 				{ headers: { "content-type": "application/json" } },
@@ -125,11 +151,20 @@ async function setup() {
 	for (const user of [U1, U2, U3, U4]) {
 		tokens[user] = await createSession(env.DB, user, "cli");
 	}
-	const call = async (user: string, method: string, path: string) => {
+	const call = async (
+		user: string,
+		method: string,
+		path: string,
+		body?: unknown,
+	) => {
 		const response = await handleApi(
 			new Request(`https://portal/api${path}`, {
 				method,
-				headers: { authorization: `Bearer ${tokens[user]}` },
+				headers: {
+					authorization: `Bearer ${tokens[user]}`,
+					...(body === undefined ? {} : { "content-type": "application/json" }),
+				},
+				body: body === undefined ? undefined : JSON.stringify(body),
 			}),
 			env,
 			fakeCtx().ctx,
@@ -206,27 +241,32 @@ describe("マイグレーション 0008", () => {
 	});
 });
 
-describe("プロバイダキーの削除", () => {
-	it("所有者だけが削除できる", async () => {
-		const { db, call } = await setup();
-		const refused = await call(U1, "POST", "/provider-keys/pk-ant/delete");
-		expect(refused.status).toBe(403);
-		expect(
-			db.rows("SELECT deleted_at FROM provider_keys WHERE id = 'pk-ant'"),
-		).toEqual([{ deleted_at: null }]);
-		expect((await call(U2, "POST", "/provider-keys/nope/delete")).status).toBe(
-			404,
-		);
-	});
+/** pk-ant(Anthropic)で動いている Managed Agents のセッション */
+function startSession(db: FakeD1, providerKeyId = "pk-ant", id = "sesn_1") {
+	db.rows(
+		"INSERT INTO agent_sessions (id, user_id, sigw_key_id, provider_key_id, owner_id, created_at) VALUES (?, ?, 'sk', ?, ?, 1)",
+		id,
+		U1,
+		providerKeyId,
+		U2,
+	);
+}
 
-	it("暗号化したキーを消し、無効にして、結び付いた sigw キーから外し、一覧から消す", async () => {
+function providerKeyRow(db: FakeD1, id: string) {
+	return db.rows(
+		"SELECT encrypted_key <> '' AS has_key, disabled_at IS NOT NULL AS disabled, deleted_at IS NOT NULL AS deleted FROM provider_keys WHERE id = ?",
+		id,
+	)[0];
+}
+
+describe("外した・差し替えた API キーの削除", () => {
+	it("外すと、暗号化したキーを消し、無効にして、一覧と中継から消す", async () => {
 		const { db, env, call } = await setup();
-		// 削除する前は、Anthropic を呼べる
 		expect((await callPublic(env, PROVIDERS.anthropic)).status).toBe(200);
 		clearAuthCache();
 
 		expect(
-			(await call(U2, "POST", "/provider-keys/pk-ant/delete")).status,
+			(await call(U2, "DELETE", "/sigw-keys/sk/providers/anthropic")).status,
 		).toBe(200);
 		const [row] = db.rows(
 			"SELECT label, key_hint, encrypted_key, disabled_at, deleted_at FROM provider_keys WHERE id = 'pk-ant'",
@@ -238,27 +278,9 @@ describe("プロバイダキーの削除", () => {
 		});
 		expect(row?.disabled_at).not.toBeNull();
 		expect(row?.deleted_at).not.toBeNull();
-		expect(
-			db.rows(
-				"SELECT provider_key_id FROM sigw_key_providers WHERE sigw_key_id = 'sk'",
-			),
-		).toEqual([{ provider_key_id: "pk-or" }]);
-
-		const list = (await call(U2, "GET", "/provider-keys"))
-			.body as ProviderKeyJson[];
-		expect(list.map((key) => key.id)).toEqual(["pk-or"]);
 		const key = (await call(U1, "GET", "/sigw-keys/sk")).body as SigwKeyJson;
 		expect(key.providerKeys.map((item) => item.id)).toEqual(["pk-or"]);
 
-		// 有効に戻す・もう一度削除する・sigw キーに足すことはできない
-		expect(
-			(await call(U2, "POST", "/provider-keys/pk-ant/enable")).status,
-		).toBe(404);
-		expect(
-			(await call(U2, "POST", "/provider-keys/pk-ant/delete")).status,
-		).toBe(404);
-
-		// 中継では、Anthropic は結び付いていないプロバイダになる。ほかのプロバイダは呼べる
 		upstreamCalls = [];
 		expect((await callPublic(env, PROVIDERS.anthropic)).status).toBe(400);
 		expect((await callPublic(env, PROVIDERS.openrouter)).status).toBe(200);
@@ -268,7 +290,6 @@ describe("プロバイダキーの削除", () => {
 		expect(await (await sigwKeyInfo(env)).json()).toMatchObject({
 			providers: ["openrouter"],
 		});
-
 		// 精算に使う使用量の行は、そのまま残る
 		expect(
 			db.rows(
@@ -277,45 +298,126 @@ describe("プロバイダキーの削除", () => {
 		).toEqual([{ provider_key_id: "pk-ant", owner_id: U2 }]);
 	});
 
-	it("動いているエージェントのセッションがあると断り、何も変えない", async () => {
-		const { db, call } = await setup();
-		db.rows(
-			"INSERT INTO agent_sessions (id, user_id, sigw_key_id, provider_key_id, owner_id, created_at) VALUES ('sesn_1', ?, 'sk', 'pk-ant', ?, 1)",
-			U1,
-			U2,
-		);
-		const before = db.rows("SELECT * FROM provider_keys WHERE id = 'pk-ant'");
-
-		const refused = await call(U2, "POST", "/provider-keys/pk-ant/delete");
-		expect(refused).toEqual({ status: 409, body: { error: SESSION_MESSAGE } });
-		expect(db.rows("SELECT * FROM provider_keys WHERE id = 'pk-ant'")).toEqual(
-			before,
-		);
+	it("動いているセッションがあっても断らない。暗号化したキーはセッションが終わるまで残し、Cron がそのキーで読んでから消す", async () => {
+		const { db, env, call } = await setup();
+		startSession(db);
+		expect(
+			(await call(U2, "DELETE", "/sigw-keys/sk/providers/anthropic")).status,
+		).toBe(200);
+		expect(providerKeyRow(db, "pk-ant")).toEqual({
+			has_key: 1,
+			disabled: 1,
+			deleted: 1,
+		});
 		expect(
 			db.rows(
 				"SELECT COUNT(*) AS n FROM sigw_key_providers WHERE provider_key_id = 'pk-ant'",
 			),
-		).toEqual([{ n: 1 }]);
+		).toEqual([{ n: 0 }]);
+		// 一覧にも中継にも出ない
+		const key = (await call(U1, "GET", "/sigw-keys/sk")).body as SigwKeyJson;
+		expect(key.providerKeys.map((item) => item.id)).toEqual(["pk-or"]);
+		upstreamCalls = [];
+		upstreamKeys = [];
+		expect((await callPublic(env, PROVIDERS.anthropic)).status).toBe(400);
+		expect(upstreamCalls).toEqual([]);
 
-		// セッションを読み終えたら、削除できる
+		// Cron は、削除したキーでセッションを読める
+		const counts = await pollAgentSessions(env, "https://api.anthropic.com");
+		expect(counts.recorded).toBe(1);
+		expect(upstreamKeys).toEqual(["real-pk-ant"]);
+		// セッションが動いているあいだは消さない
+		expect(await purgeDeletedProviderKeys(env.DB)).toBe(0);
+		expect(providerKeyRow(db, "pk-ant")?.has_key).toBe(1);
+
 		db.rows(
 			"UPDATE agent_sessions SET ended_at = 2, end_reason = 'terminated'",
 		);
-		expect(
-			(await call(U2, "POST", "/provider-keys/pk-ant/delete")).status,
-		).toBe(200);
+		expect(await purgeDeletedProviderKeys(env.DB)).toBe(1);
+		expect(providerKeyRow(db, "pk-ant")).toEqual({
+			has_key: 0,
+			disabled: 1,
+			deleted: 1,
+		});
+		expect(await purgeDeletedProviderKeys(env.DB)).toBe(0);
 	});
 
-	it("Cron は、削除したプロバイダキーを復号しない", async () => {
+	it("差し替えたときも、前のキーは同じように扱う", async () => {
+		const { db, env, call } = await setup();
+		startSession(db);
+		expect(
+			(
+				await call(U1, "PUT", "/sigw-keys/sk/providers/anthropic", {
+					apiKey: "sk-ant-new-key-NEW1",
+				})
+			).status,
+		).toBe(200);
+		expect(providerKeyRow(db, "pk-ant")).toEqual({
+			has_key: 1,
+			disabled: 1,
+			deleted: 1,
+		});
+		upstreamKeys = [];
+		expect((await callPublic(env, PROVIDERS.anthropic)).status).toBe(200);
+		expect(upstreamKeys).toEqual(["sk-ant-new-key-NEW1"]);
+		// 新しいキーは U1 のもの。使用量も U1 を所有者として記録する
+		expect(
+			db.rows("SELECT owner_id FROM usage_events WHERE id <> 'e1'"),
+		).toEqual([{ owner_id: U1 }]);
+
+		upstreamKeys = [];
+		await pollAgentSessions(env, "https://api.anthropic.com");
+		expect(upstreamKeys).toEqual(["real-pk-ant"]);
+	});
+
+	it("差し替えたあとのセッションの DELETE は、作ったときのキーで最後の分を読み、別のキーでの 404 では読むのをやめない", async () => {
+		const { db, env, call } = await setup();
+		startSession(db);
+		await call(U1, "PUT", "/sigw-keys/sk/providers/anthropic", {
+			apiKey: "sk-ant-new-key-NEW1",
+		});
+		sessionDeleteStatus = 404;
+		upstreamCalls = [];
+		upstreamKeys = [];
+		const { ctx, settle } = fakeCtx();
+		const response = await handleProxy(
+			new Request("https://sigw/anthropic/v1/sessions/sesn_1", {
+				method: "DELETE",
+				headers: {
+					authorization: `Bearer ${SIGW_TOKEN}.${PERSONAL_TOKEN}`,
+				},
+			}),
+			env,
+			ctx,
+			PROVIDERS.anthropic,
+			"/v1/sessions/sesn_1",
+			"",
+		);
+		await settle();
+		expect(response.status).toBe(404);
+		expect(upstreamKeys).toEqual(["real-pk-ant", "sk-ant-new-key-NEW1"]);
+		expect(
+			db.rows("SELECT ended_at FROM agent_sessions WHERE id = 'sesn_1'"),
+		).toEqual([{ ended_at: null }]);
+	});
+
+	it("中継は、削除したプロバイダキーを、暗号化したキーが残っていても使わない", async () => {
+		const { db, env } = await setup();
+		// 結び付きが残っていても、deleted_at があれば使わない
+		db.rows("UPDATE provider_keys SET deleted_at = 1 WHERE id = 'pk-ant'");
+		expect((await callPublic(env, PROVIDERS.anthropic)).status).toBe(400);
+		expect(upstreamCalls).toEqual([]);
+		expect(await (await sigwKeyInfo(env)).json()).toMatchObject({
+			providers: ["openrouter"],
+		});
+	});
+
+	it("Cron は、暗号化したキーを消したプロバイダキーを復号しない", async () => {
 		const { db, env } = await setup();
 		db.rows(
 			"UPDATE provider_keys SET encrypted_key = '', deleted_at = 1 WHERE id = 'pk-ant'",
 		);
-		db.rows(
-			"INSERT INTO agent_sessions (id, user_id, sigw_key_id, provider_key_id, owner_id, created_at) VALUES ('sesn_1', ?, 'sk', 'pk-ant', ?, 1)",
-			U1,
-			U2,
-		);
+		startSession(db);
 		const errors = vi.spyOn(console, "error").mockImplementation(() => {});
 		const counts = await pollAgentSessions(env, "https://sigw");
 		expect(counts.error).toBe(1);
@@ -324,10 +426,18 @@ describe("プロバイダキーの削除", () => {
 		expect(errors).not.toHaveBeenCalled();
 		errors.mockRestore();
 	});
+
+	it("プロバイダキーの削除の API(/provider-keys/:id/delete)はなくなった", async () => {
+		const { db, call } = await setup();
+		expect(
+			(await call(U2, "POST", "/provider-keys/pk-ant/delete")).status,
+		).toBe(404);
+		expect(providerKeyRow(db, "pk-ant")?.deleted).toBe(0);
+	});
 });
 
 describe("sigw キーの削除", () => {
-	it("発行した人と、結び付いたプロバイダキーの所有者だけが削除できる", async () => {
+	it("発行した人と、API キーを登録した人だけが削除できる", async () => {
 		const { db, call } = await setup();
 		expect((await call(U4, "POST", "/sigw-keys/sk/delete")).status).toBe(403);
 		expect(db.rows("SELECT deleted_at FROM sigw_keys")).toEqual([
@@ -363,6 +473,28 @@ describe("sigw キーの削除", () => {
 		expect((await callPublic(env, PROVIDERS.anthropic)).status).toBe(401);
 		expect(upstreamCalls).toEqual([]);
 		expect((await sigwKeyInfo(env)).status).toBe(401);
+	});
+
+	it("登録した API キーも削除する。動いているセッションのキーは、終わるまで暗号化したキーを残す", async () => {
+		const { db, env, call } = await setup();
+		startSession(db);
+		expect((await call(U1, "POST", "/sigw-keys/sk/delete")).status).toBe(200);
+		expect(db.rows("SELECT COUNT(*) AS n FROM sigw_key_providers")).toEqual([
+			{ n: 0 },
+		]);
+		expect(providerKeyRow(db, "pk-ant")).toEqual({
+			has_key: 1,
+			disabled: 1,
+			deleted: 1,
+		});
+		expect(providerKeyRow(db, "pk-or")).toEqual({
+			has_key: 0,
+			disabled: 1,
+			deleted: 1,
+		});
+		db.rows("UPDATE agent_sessions SET ended_at = 2, end_reason = 'deleted'");
+		expect(await purgeDeletedProviderKeys(env.DB)).toBe(1);
+		expect(providerKeyRow(db, "pk-ant")?.has_key).toBe(0);
 	});
 
 	it("無効にした sigw キーも削除でき、DELETE /sigw-keys/:id は今までどおり無効にするだけ", async () => {
@@ -401,5 +533,102 @@ describe("sigw キーの削除", () => {
 		expect(usage.pairs).toMatchObject([
 			{ userId: U1, ownerId: U2, costNano: 1000 },
 		]);
+	});
+});
+
+describe("マイグレーション 0009", () => {
+	function seed(db: FakeD1) {
+		db.sqlite.exec(`
+			INSERT INTO users (id, name, created_at, updated_at) VALUES ('u1', 'A', 1, 1), ('u2', 'B', 1, 1);
+			INSERT INTO provider_keys (id, owner_id, provider, label, encrypted_key, key_hint, created_at, disabled_at, delegated_only, deleted_at) VALUES
+				('pk-linked', 'u1', 'typesafe', 'main', 'enc-linked', '…aaaa', 10, NULL, 0, NULL),
+				('pk-shared', 'u2', 'anthropic', 'main', 'enc-shared', '…bbbb', 10, NULL, 1, NULL),
+				('pk-disabled', 'u2', 'openai', 'main', 'enc-disabled', '…cccc', 10, 20, 0, NULL),
+				('pk-orphan', 'u1', 'openrouter', 'spare', 'enc-orphan', '…dddd', 10, NULL, 0, NULL),
+				('pk-orphan-live', 'u2', 'anthropic', 'agents', 'enc-live', '…eeee', 10, 30, 0, NULL),
+				('pk-orphan-ended', 'u2', 'anthropic', 'old', 'enc-ended', '…ffff', 10, NULL, 0, NULL),
+				('pk-deleted-sigw', 'u1', 'xai', 'x', 'enc-x', '…gggg', 10, NULL, 0, NULL),
+				('pk-already', 'u1', 'xai', 'gone', '', '…hhhh', 10, 5, 0, 5);
+			INSERT INTO sigw_keys (id, created_by, purpose, token_hash, token_hint, created_at, updated_at, revoked_at, deleted_at) VALUES
+				('sk1', 'u1', 'Bobert', 'h1', 'sgk_a…1', 100, 100, NULL, NULL),
+				('sk2', 'u2', 'バッチ', 'h2', 'sgk_a…2', 100, 100, 150, NULL),
+				('sk3', 'u1', '消した', 'deleted:sk3', 'sgk_a…3', 100, 100, 160, 160);
+			INSERT INTO sigw_key_providers VALUES
+				('sk1', 'typesafe', 'pk-linked', 100),
+				('sk1', 'anthropic', 'pk-shared', 100),
+				('sk2', 'anthropic', 'pk-shared', 100),
+				('sk2', 'openai', 'pk-disabled', 100),
+				('sk3', 'xai', 'pk-deleted-sigw', 100);
+			INSERT INTO agent_sessions (id, user_id, sigw_key_id, provider_key_id, owner_id, created_at, ended_at) VALUES
+				('sesn_live', 'u1', 'sk9', 'pk-orphan-live', 'u2', 1, NULL),
+				('sesn_ended', 'u1', 'sk9', 'pk-orphan-ended', 'u2', 1, 2);
+		`);
+	}
+
+	it("どの sigw キーにも結び付いていないプロバイダキーを削除し、動いているセッションのキーだけ暗号化したキーを残す", () => {
+		const db = new FakeD1({ before: "0009" });
+		seed(db);
+		const before = db.rows("SELECT * FROM provider_keys ORDER BY id");
+		const startedAt = Date.now();
+
+		db.migrate();
+
+		const after = db.rows("SELECT * FROM provider_keys ORDER BY id");
+		const byId = new Map(after.map((row) => [row.id, row]));
+		// 結び付いたキーと、すでに削除したキーは、そのまま
+		for (const id of ["pk-linked", "pk-shared", "pk-disabled", "pk-already"]) {
+			expect(byId.get(id)).toEqual(before.find((row) => row.id === id));
+		}
+		for (const id of ["pk-orphan", "pk-orphan-ended", "pk-deleted-sigw"]) {
+			const row = byId.get(id);
+			expect(row?.encrypted_key).toBe("");
+			expect(Number(row?.deleted_at)).toBeGreaterThanOrEqual(startedAt - 1000);
+			expect(row?.disabled_at).toBe(row?.deleted_at);
+			// 名前と末尾4文字は残す
+			expect(row?.key_hint).toBe(
+				before.find((item) => item.id === id)?.key_hint,
+			);
+		}
+		const live = byId.get("pk-orphan-live");
+		expect(live?.encrypted_key).toBe("enc-live");
+		expect(live?.deleted_at).not.toBeNull();
+		// 前に無効にした時刻は変えない
+		expect(live?.disabled_at).toBe(30);
+
+		// 削除した sigw キーの結び付きだけを消す
+		expect(
+			db.rows(
+				"SELECT sigw_key_id, provider FROM sigw_key_providers ORDER BY sigw_key_id, provider",
+			),
+		).toEqual([
+			{ sigw_key_id: "sk1", provider: "anthropic" },
+			{ sigw_key_id: "sk1", provider: "typesafe" },
+			{ sigw_key_id: "sk2", provider: "anthropic" },
+			{ sigw_key_id: "sk2", provider: "openai" },
+		]);
+		expect(db.rows("SELECT * FROM sigw_keys ORDER BY id")).toHaveLength(3);
+		expect(db.rows("PRAGMA foreign_key_check")).toEqual([]);
+	});
+
+	it("2つの sigw キーに結び付いたキーは、片方で差し替えたり外したりしても、もう片方に結び付いているあいだは削除しない", async () => {
+		const db = new FakeD1({ before: "0009" });
+		seed(db);
+		db.migrate();
+		db.rows("UPDATE sigw_keys SET revoked_at = NULL WHERE id = 'sk2'");
+		await setSigwKeyProvider(db.asD1(), SECRET, "sk1", "u1", {
+			provider: "anthropic",
+			apiKey: "sk-ant-new-key-NEW1",
+		});
+		expect(providerKeyRow(db, "pk-shared")).toEqual({
+			has_key: 1,
+			disabled: 0,
+			deleted: 0,
+		});
+		await removeSigwKeyProvider(db.asD1(), "sk2", "u2", "anthropic");
+		expect(providerKeyRow(db, "pk-shared")).toEqual({
+			has_key: 0,
+			disabled: 1,
+			deleted: 1,
+		});
 	});
 });

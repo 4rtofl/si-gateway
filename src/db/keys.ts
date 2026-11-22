@@ -1,11 +1,12 @@
 /*
- * プロバイダキーと sigw キー。
- * - プロバイダキーは、所有者だけが無効にできる。キーそのものは暗号化して保存し、画面には末尾4文字だけ出す
- * - 代理専用のプロバイダキーは、登録するときに決める。あとから公開の入口で使えるようにはしない
- * - sigw キーは誰でも発行できる。プロバイダごとに1つずつ、プロバイダキーを結び付ける(sigw_key_providers)
- * - sigw キーの変更と無効化は、発行した人と、結び付いたプロバイダキーの所有者ができる
- * - 削除は、無効化と同じ人ができる。秘密の値(暗号化したキー、トークンのハッシュ)だけを消し、行は残す。
- *   過去の使用量に名前を出すため。削除したキーは、一覧にも出さない(docs/design.md 3.3)
+ * sigw キーと、sigw キーに登録する API キー(プロバイダキー、provider_keys)。docs/design.md 3.2、3.3
+ * - sigw キーは誰でも発行できる。API キーは、sigw キーごとに、プロバイダごとに1つまで登録する(sigw_key_providers)
+ * - API キーは、登録した sigw キーだけのもの。ほかの sigw キーとは共有しない。登録した人が所有者(精算で払った人)になる。
+ *   キーそのものは暗号化して保存し、画面には末尾4文字だけ出す
+ * - 代理専用は、API キーを登録するときに決める。あとから公開の入口で使えるようにはしない
+ * - sigw キーの変更・無効化・削除と、API キーの登録・差し替え・外すのは、発行した人と、API キーを登録した人ができる(canEditSigwKey)
+ * - 外した・差し替えた API キーは削除する。削除しても行は残し、秘密の値(暗号化したキー、トークンのハッシュ)だけを消す。
+ *   過去の使用量に名前を出すため。削除したキーは、一覧にも出さない
  */
 
 import {
@@ -16,7 +17,7 @@ import {
 	TOKEN_PREFIX,
 	tokenHint,
 } from "../lib/crypto.ts";
-import { badRequest, conflict, forbidden, notFound } from "../lib/errors.ts";
+import { badRequest, forbidden, notFound } from "../lib/errors.ts";
 import {
 	isProviderId,
 	PROVIDER_IDS,
@@ -24,71 +25,21 @@ import {
 	type ProviderId,
 } from "../proxy/providers.ts";
 
-export interface ProviderKey {
-	id: string;
-	ownerId: string;
-	ownerName: string;
-	provider: ProviderId;
-	label: string;
-	keyHint: string;
-	createdAt: number;
-	disabledAt: number | null;
-	/** 結び付いた、有効な sigw キーの数 */
-	activeSigwKeys: number;
-	/** 代理専用。このプロバイダキーを使う呼び出しは、BobertGateway からしか使えない */
-	delegatedOnly: boolean;
-}
-
-export async function listProviderKeys(db: D1Database): Promise<ProviderKey[]> {
-	const { results } = await db
-		.prepare(
-			`SELECT p.id, p.owner_id, u.name AS owner_name, p.provider, p.label, p.key_hint, p.created_at, p.disabled_at, p.delegated_only,
-				(SELECT COUNT(*) FROM sigw_key_providers l JOIN sigw_keys s ON s.id = l.sigw_key_id
-					WHERE l.provider_key_id = p.id AND s.revoked_at IS NULL) AS active_sigw_keys
-			 FROM provider_keys p JOIN users u ON u.id = p.owner_id
-			 WHERE p.deleted_at IS NULL
-			 ORDER BY p.disabled_at IS NOT NULL, p.created_at`,
-		)
-		.all<{
-			id: string;
-			owner_id: string;
-			owner_name: string;
-			provider: ProviderId;
-			label: string;
-			key_hint: string;
-			created_at: number;
-			disabled_at: number | null;
-			delegated_only: number;
-			active_sigw_keys: number;
-		}>();
-	return results.map((row) => ({
-		id: row.id,
-		ownerId: row.owner_id,
-		ownerName: row.owner_name,
-		provider: row.provider,
-		label: row.label,
-		keyHint: row.key_hint,
-		createdAt: row.created_at,
-		disabledAt: row.disabled_at,
-		activeSigwKeys: row.active_sigw_keys,
-		delegatedOnly: row.delegated_only === 1,
-	}));
-}
-
-export interface NewProviderKey {
-	ownerId: string;
+/** sigw キーに登録する API キー(プロバイダキー)。登録した人が所有者になる */
+export interface NewApiKey {
 	provider: string;
-	label: string;
 	apiKey: string;
 	/** 代理専用にする(BobertGateway からだけ使える)。登録したあとは変えられない */
 	delegatedOnly?: boolean;
 }
 
-export async function createProviderKey(
-	db: D1Database,
-	encryptionSecret: string,
-	input: NewProviderKey,
-): Promise<string> {
+interface ValidApiKey {
+	provider: ProviderId;
+	apiKey: string;
+	delegatedOnly: boolean;
+}
+
+function validateApiKey(input: NewApiKey): ValidApiKey {
 	if (!isProviderId(input.provider)) {
 		throw badRequest(`プロバイダ ${input.provider} には対応していません`);
 	}
@@ -96,12 +47,24 @@ export async function createProviderKey(
 	if (apiKey.length < 8 || /\s/.test(apiKey)) {
 		throw badRequest("API キーの形が正しくありません");
 	}
-	const label = input.label.trim() || "メイン";
-	if (label.length > 60) {
-		throw badRequest("名前は60文字までにしてください");
-	}
+	return {
+		provider: input.provider,
+		apiKey,
+		delegatedOnly: input.delegatedOnly === true,
+	};
+}
+
+/**
+ * プロバイダキーの行を足す文と、その ID。名前(label)は sigw キーの目的にする。画面には出さない
+ */
+async function insertProviderKey(
+	db: D1Database,
+	encryptionSecret: string,
+	input: ValidApiKey & { ownerId: string; label: string },
+	now: number,
+): Promise<{ id: string; statement: D1PreparedStatement }> {
 	const id = newId();
-	await db
+	const statement = db
 		.prepare(
 			"INSERT INTO provider_keys (id, owner_id, provider, label, encrypted_key, key_hint, created_at, delegated_only) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
 		)
@@ -109,106 +72,83 @@ export async function createProviderKey(
 			id,
 			input.ownerId,
 			input.provider,
-			label,
-			await encryptText(encryptionSecret, apiKey),
-			`…${apiKey.slice(-4)}`,
-			Date.now(),
+			input.label.slice(0, 60),
+			await encryptText(encryptionSecret, input.apiKey),
+			`…${input.apiKey.slice(-4)}`,
+			now,
 			input.delegatedOnly ? 1 : 0,
-		)
-		.run();
-	return id;
-}
-
-/** 削除していないプロバイダキーの所有者かを確かめる */
-async function requireProviderKeyOwner(
-	db: D1Database,
-	id: string,
-	actorId: string,
-): Promise<void> {
-	const row = await db
-		.prepare(
-			"SELECT owner_id FROM provider_keys WHERE id = ? AND deleted_at IS NULL",
-		)
-		.bind(id)
-		.first<{ owner_id: string }>();
-	if (!row) {
-		throw notFound("プロバイダキーが見つかりません");
-	}
-	if (row.owner_id !== actorId) {
-		throw forbidden("プロバイダキーを変えられるのは、登録した人だけです");
-	}
-}
-
-/** プロバイダキーを無効にする(enabled = false)か、有効に戻す。所有者だけができる */
-export async function setProviderKeyEnabled(
-	db: D1Database,
-	id: string,
-	actorId: string,
-	enabled: boolean,
-): Promise<void> {
-	await requireProviderKeyOwner(db, id, actorId);
-	await db
-		.prepare("UPDATE provider_keys SET disabled_at = ? WHERE id = ?")
-		.bind(enabled ? null : Date.now(), id)
-		.run();
+		);
+	return { id, statement };
 }
 
 /**
- * プロバイダキーを削除する。所有者だけができる。
- * 暗号化したキーを消し(空の文字列にする)、無効にして、結び付いたすべての sigw キーから外す。
- * 名前と末尾4文字は残す。
- * Managed Agents のセッションが動いている(読むのをやめていない)あいだは断る。
- * Cron がこのキーでセッションの使用量を読むため(docs/design.md 5.3)
+ * どの(削除していない)sigw キーにも結び付いていないプロバイダキーを削除する文。ids のうち、当てはまるものだけを消す。
+ * 外したり差し替えたりしたあとに、同じバッチの最後に流す。
+ * - 無効にして deleted_at を入れる。一覧にも出さず、中継でも使わない
+ * - 暗号化したキーは、Managed Agents のセッションが動いていなければ、すぐ消す(空の文字列にする)。
+ *   動いていれば残し、セッションが終わってから Cron が消す(purgeDeletedProviderKeys)。
+ *   Cron がこのキーで、セッションの使用量を読むため(docs/design.md 3.3、5.3)
+ * - 0009 より前に作った、2つ以上の sigw キーに結び付いたキーは、ほかの sigw キーに結び付いているあいだは消さない
  */
-export async function deleteProviderKey(
+function deleteUnlinkedProviderKeys(
 	db: D1Database,
-	id: string,
-	actorId: string,
-): Promise<void> {
-	await requireProviderKeyOwner(db, id, actorId);
-	const now = Date.now();
-	// セッションの確かめと削除を、同じトランザクションで行う。確かめたあとにセッションが増えても、消さないため
-	const [deleted] = await db.batch([
-		db
-			.prepare(
-				`UPDATE provider_keys SET encrypted_key = '', deleted_at = ?, disabled_at = COALESCE(disabled_at, ?)
-				 WHERE id = ? AND deleted_at IS NULL
-					AND NOT EXISTS (SELECT 1 FROM agent_sessions WHERE provider_key_id = ? AND ended_at IS NULL)`,
-			)
-			.bind(now, now, id, id),
-		db
-			.prepare(
-				`UPDATE sigw_keys SET updated_at = ?
-				 WHERE id IN (SELECT sigw_key_id FROM sigw_key_providers WHERE provider_key_id = ?)
-					AND EXISTS (SELECT 1 FROM provider_keys WHERE id = ? AND deleted_at = ?)`,
-			)
-			.bind(now, id, id, now),
-		db
-			.prepare(
-				`DELETE FROM sigw_key_providers WHERE provider_key_id = ?
-					AND EXISTS (SELECT 1 FROM provider_keys WHERE id = ? AND deleted_at = ?)`,
-			)
-			.bind(id, id, now),
-	]);
-	if ((deleted?.meta.changes ?? 0) === 0) {
-		throw conflict(
-			"このプロバイダキーで動いているエージェントのセッションがあります。セッションが終わってから削除してください。",
-		);
+	ids: string[],
+	now: number,
+): D1PreparedStatement[] {
+	if (ids.length === 0) {
+		return [];
 	}
+	return [
+		db
+			.prepare(
+				`UPDATE provider_keys SET deleted_at = ?, disabled_at = COALESCE(disabled_at, ?),
+					encrypted_key = CASE
+						WHEN EXISTS (SELECT 1 FROM agent_sessions a WHERE a.provider_key_id = provider_keys.id AND a.ended_at IS NULL)
+						THEN encrypted_key ELSE '' END
+				 WHERE id IN (${ids.map(() => "?").join(", ")}) AND deleted_at IS NULL
+					AND NOT EXISTS (
+						SELECT 1 FROM sigw_key_providers l JOIN sigw_keys s ON s.id = l.sigw_key_id
+						WHERE l.provider_key_id = provider_keys.id AND s.deleted_at IS NULL
+					)`,
+			)
+			.bind(now, now, ...ids),
+	];
 }
 
-/** sigw キーに結び付いたプロバイダキー。sigw キー1つに、プロバイダごとに1つまで */
+/**
+ * 削除したプロバイダキーのうち、暗号化したキーが残っていて、動いているセッションがなくなったものから、キーを消す。
+ * Managed Agents のセッションを読む Cron(5分ごと)が、読み終えたあとに呼ぶ。消した数を返す
+ */
+export async function purgeDeletedProviderKeys(
+	db: D1Database,
+): Promise<number> {
+	const result = await db
+		.prepare(
+			`UPDATE provider_keys SET encrypted_key = ''
+			 WHERE deleted_at IS NOT NULL AND encrypted_key <> ''
+				AND NOT EXISTS (SELECT 1 FROM agent_sessions a WHERE a.provider_key_id = provider_keys.id AND a.ended_at IS NULL)`,
+		)
+		.run();
+	return result.meta.changes ?? 0;
+}
+
+/**
+ * sigw キーに登録した API キー(プロバイダキー)。sigw キー1つに、プロバイダごとに1つまで。
+ * API キーは、登録した sigw キーだけのもの(docs/design.md 3.2)
+ */
 export interface LinkedProviderKey {
 	id: string;
 	provider: ProviderId;
-	label: string;
+	/** 末尾4文字 */
+	keyLast4: string;
+	/** 登録した人。精算では、この人が払った人になる */
 	ownerId: string;
 	ownerName: string;
-	/** プロバイダキーが無効。このプロバイダだけ呼べない */
+	/** プロバイダキーが無効。このプロバイダだけ呼べない(0009 より前に無効にしたキーだけ) */
 	disabled: boolean;
 	/** 代理専用。このプロバイダの呼び出しは、BobertGateway からしか使えない */
 	delegatedOnly: boolean;
-	/** 結び付けた時刻 */
+	/** 登録した時刻 */
 	linkedAt: number;
 }
 
@@ -247,7 +187,7 @@ interface LinkRow {
 	sigw_key_id: string;
 	provider_key_id: string;
 	provider: ProviderId;
-	label: string;
+	key_hint: string;
 	owner_id: string;
 	owner_name: string;
 	disabled_at: number | null;
@@ -260,17 +200,18 @@ const SIGW_KEY_SELECT = `SELECT s.id, s.created_by, c.name AS created_by_name, s
 	FROM sigw_keys s
 	JOIN users c ON c.id = s.created_by`;
 
-const LINK_SELECT = `SELECT l.sigw_key_id, l.provider_key_id, l.provider, p.label, p.owner_id, o.name AS owner_name,
+const LINK_SELECT = `SELECT l.sigw_key_id, l.provider_key_id, l.provider, p.key_hint, p.owner_id, o.name AS owner_name,
 	p.disabled_at, p.delegated_only, l.created_at AS linked_at
 	FROM sigw_key_providers l
 	JOIN provider_keys p ON p.id = l.provider_key_id
-	JOIN users o ON o.id = p.owner_id`;
+	JOIN users o ON o.id = p.owner_id
+	WHERE p.deleted_at IS NULL`;
 
 function toLinked(row: LinkRow): LinkedProviderKey {
 	return {
 		id: row.provider_key_id,
 		provider: row.provider,
-		label: row.label,
+		keyLast4: row.key_hint.replace(/^…/, ""),
 		ownerId: row.owner_id,
 		ownerName: row.owner_name,
 		disabled: row.disabled_at !== null,
@@ -346,7 +287,7 @@ export async function getSigwKey(
 		db
 			.prepare(`${SIGW_KEY_SELECT} WHERE s.id = ? AND s.deleted_at IS NULL`)
 			.bind(id),
-		db.prepare(`${LINK_SELECT} WHERE l.sigw_key_id = ?`).bind(id),
+		db.prepare(`${LINK_SELECT} AND l.sigw_key_id = ?`).bind(id),
 	]);
 	return (
 		toSigwKeys(
@@ -384,78 +325,51 @@ function validateSettings(settings: SigwKeySettings): SigwKeySettings {
 	return { ...settings, purpose };
 }
 
-interface ProviderKeyState {
-	id: string;
-	provider: ProviderId;
-	owner_id: string;
-	disabled_at: number | null;
-}
-
-async function providerKeyState(
-	db: D1Database,
-	id: string,
-): Promise<ProviderKeyState> {
-	const row = await db
-		.prepare(
-			"SELECT id, provider, owner_id, disabled_at FROM provider_keys WHERE id = ? AND deleted_at IS NULL",
-		)
-		.bind(id)
-		.first<ProviderKeyState>();
-	if (!row) {
-		throw notFound("プロバイダキーが見つかりません");
-	}
-	return row;
-}
-
 function providerLabel(provider: ProviderId): string {
 	return PROVIDERS[provider]?.label ?? provider;
 }
 
+/** sigw_key_providers に結び付きを足すか、そのプロバイダの結び付きを差し替える文 */
 function linkStatement(
 	db: D1Database,
 	sigwKeyId: string,
-	providerKey: ProviderKeyState,
+	provider: ProviderId,
+	providerKeyId: string,
 	now: number,
 ): D1PreparedStatement {
 	return db
 		.prepare(
-			"INSERT INTO sigw_key_providers (sigw_key_id, provider, provider_key_id, created_at) VALUES (?, ?, ?, ?)",
+			`INSERT INTO sigw_key_providers (sigw_key_id, provider, provider_key_id, created_at) VALUES (?, ?, ?, ?)
+			 ON CONFLICT (sigw_key_id, provider) DO UPDATE SET provider_key_id = excluded.provider_key_id, created_at = excluded.created_at`,
 		)
-		.bind(sigwKeyId, providerKey.provider, providerKey.id, now);
+		.bind(sigwKeyId, provider, providerKeyId, now);
 }
 
 /**
  * sigw キーを発行する。発行したトークン(平文)を返す。トークンはこのときにしか見られない。
- * providerKeyIds は結び付けるプロバイダキー。1つ以上で、プロバイダごとに1つまで
+ * apiKeys は、一緒に登録する API キー。プロバイダごとに1つまで。発行した人が、どのキーの所有者にもなる。
+ * API では0個でも発行できる(CLI は発行したあとで set-provider で登録する)。Web UI では1つ以上を求める
  */
 export async function createSigwKey(
 	db: D1Database,
-	input: SigwKeySettings & { providerKeyIds: string[]; createdBy: string },
+	encryptionSecret: string,
+	input: SigwKeySettings & { apiKeys: NewApiKey[]; createdBy: string },
 ): Promise<{ id: string; token: string }> {
 	const settings = validateSettings(input);
-	const ids = [...new Set(input.providerKeyIds)];
-	if (ids.length === 0) {
-		throw badRequest("プロバイダキーを選んでください");
-	}
-	const providerKeys: ProviderKeyState[] = [];
-	for (const providerKeyId of ids) {
-		const providerKey = await providerKeyState(db, providerKeyId);
-		if (providerKey.disabled_at !== null) {
+	const apiKeys = input.apiKeys.map(validateApiKey);
+	const seen = new Set<ProviderId>();
+	for (const apiKey of apiKeys) {
+		if (seen.has(apiKey.provider)) {
 			throw badRequest(
-				"無効になっているプロバイダキーには、sigw キーを発行できません",
+				`${providerLabel(apiKey.provider)} の API キーは1つだけ入れてください`,
 			);
 		}
-		if (providerKeys.some((item) => item.provider === providerKey.provider)) {
-			throw badRequest(
-				`${providerLabel(providerKey.provider)} のプロバイダキーは1つだけ選んでください`,
-			);
-		}
-		providerKeys.push(providerKey);
+		seen.add(apiKey.provider);
 	}
 	const id = newId();
 	const token = newToken(TOKEN_PREFIX.sigwKey);
 	const now = Date.now();
-	await db.batch([
+	const statements: D1PreparedStatement[] = [
 		db
 			.prepare(
 				`INSERT INTO sigw_keys (id, created_by, purpose, token_hash, token_hint, allowed_models,
@@ -474,14 +388,37 @@ export async function createSigwKey(
 				now,
 				now,
 			),
-		...providerKeys.map((providerKey) =>
-			linkStatement(db, id, providerKey, now),
-		),
-	]);
+	];
+	for (const apiKey of apiKeys) {
+		const inserted = await insertProviderKey(
+			db,
+			encryptionSecret,
+			{ ...apiKey, ownerId: input.createdBy, label: settings.purpose },
+			now,
+		);
+		statements.push(
+			inserted.statement,
+			linkStatement(db, id, apiKey.provider, inserted.id, now),
+		);
+	}
+	await db.batch(statements);
 	return { id, token };
 }
 
-/** 設定を変えられるのは、発行した人と、結び付いたプロバイダキーの所有者 */
+/**
+ * sigw キーを変えられる人か。発行した人と、登録した API キーの所有者(登録した人)。
+ * 設定の変更、無効化、削除、API キーの登録・差し替え・外すのは、すべてこの人たち
+ */
+export function canEditSigwKey(
+	key: Pick<SigwKey, "createdBy" | "providerKeys">,
+	actorId: string,
+): boolean {
+	return (
+		key.createdBy === actorId ||
+		key.providerKeys.some((providerKey) => providerKey.ownerId === actorId)
+	);
+}
+
 async function requireEditable(
 	db: D1Database,
 	id: string,
@@ -491,12 +428,9 @@ async function requireEditable(
 	if (!key) {
 		throw notFound("sigw キーが見つかりません");
 	}
-	if (
-		key.createdBy !== actorId &&
-		!key.providerKeys.some((providerKey) => providerKey.ownerId === actorId)
-	) {
+	if (!canEditSigwKey(key, actorId)) {
 		throw forbidden(
-			"sigw キーを変えられるのは、発行した人と、結び付いたプロバイダキーの所有者だけです",
+			"sigw キーを変えられるのは、発行した人と、API キーを登録した人だけです",
 		);
 	}
 	return key;
@@ -526,92 +460,73 @@ export async function updateSigwKey(
 }
 
 /**
- * 発行したあとの sigw キーに、プロバイダキーを足す。
- * 足せるのは、sigw キーを変えられる人(requireEditable)のうち、
- * 足すプロバイダキーの所有者か、sigw キーを発行した人。
- * 発行した人は、誰のプロバイダキーでも足せる(発行し直せば同じことができるため)。
- * 所有者は自分のキーだけ足せる(ほかの人のキーを、自分が発行していない sigw キーに付けないため)
+ * sigw キーに、そのプロバイダの API キーを登録する。登録済みなら差し替え、前のキーは削除する。
+ * 登録した人が、新しいキーの所有者になる。無効にした sigw キーには登録できない
  */
-export async function addSigwKeyProvider(
+export async function setSigwKeyProvider(
 	db: D1Database,
+	encryptionSecret: string,
 	id: string,
 	actorId: string,
-	providerKeyId: string,
+	input: NewApiKey,
 ): Promise<void> {
 	const key = await requireEditable(db, id, actorId);
 	if (key.revokedAt !== null) {
 		throw badRequest("無効にした sigw キーは変えられません");
 	}
-	const providerKey = await providerKeyState(db, providerKeyId);
-	if (key.createdBy !== actorId && providerKey.owner_id !== actorId) {
-		throw forbidden(
-			"ほかの人のプロバイダキーを足せるのは、sigw キーを発行した人だけです",
-		);
-	}
-	if (providerKey.disabled_at !== null) {
-		throw badRequest("無効になっているプロバイダキーは足せません");
-	}
-	const current = key.providerKeys.find(
-		(item) => item.provider === providerKey.provider,
+	const apiKey = validateApiKey(input);
+	const previous = key.providerKeys.find(
+		(item) => item.provider === apiKey.provider,
 	);
-	if (current?.id === providerKey.id) {
-		return;
-	}
-	if (current) {
-		throw badRequest(
-			`この sigw キーには、すでに ${providerLabel(providerKey.provider)} のプロバイダキーがあります。先に外してください`,
-		);
-	}
 	const now = Date.now();
+	const inserted = await insertProviderKey(
+		db,
+		encryptionSecret,
+		{ ...apiKey, ownerId: actorId, label: key.purpose },
+		now,
+	);
 	await db.batch([
-		linkStatement(db, id, providerKey, now),
+		inserted.statement,
+		linkStatement(db, id, apiKey.provider, inserted.id, now),
 		db
 			.prepare("UPDATE sigw_keys SET updated_at = ? WHERE id = ?")
 			.bind(now, id),
+		...deleteUnlinkedProviderKeys(db, previous ? [previous.id] : [], now),
 	]);
 }
 
 /**
- * sigw キーから、プロバイダキーを外す。外せるのは、sigw キーを発行した人と、外すプロバイダキーの所有者。
- * 最後の1つは外せない(使わないなら、sigw キーを無効にする)
+ * sigw キーから、そのプロバイダの API キーを外して削除する。登録していなければ何もしない。
+ * 最後の1つも外せる(sigw キーは「API キーが未登録」になる)
  */
 export async function removeSigwKeyProvider(
 	db: D1Database,
 	id: string,
 	actorId: string,
-	providerKeyId: string,
+	provider: string,
 ): Promise<void> {
-	const key = await getSigwKey(db, id);
-	if (!key) {
-		throw notFound("sigw キーが見つかりません");
+	if (!isProviderId(provider)) {
+		throw badRequest(`プロバイダ ${provider} には対応していません`);
 	}
-	const link = key.providerKeys.find((item) => item.id === providerKeyId);
-	if (!link) {
-		throw notFound("この sigw キーには、そのプロバイダキーはありません");
-	}
-	if (key.createdBy !== actorId && link.ownerId !== actorId) {
-		throw forbidden(
-			"プロバイダキーを外せるのは、sigw キーを発行した人と、そのプロバイダキーの所有者だけです",
-		);
-	}
+	const key = await requireEditable(db, id, actorId);
 	if (key.revokedAt !== null) {
 		throw badRequest("無効にした sigw キーは変えられません");
 	}
-	if (key.providerKeys.length === 1) {
-		throw badRequest(
-			"最後のプロバイダキーは外せません。使わないなら、sigw キーを無効にしてください",
-		);
+	const current = key.providerKeys.find((item) => item.provider === provider);
+	if (!current) {
+		return;
 	}
 	const now = Date.now();
 	await db.batch([
 		db
 			.prepare(
-				"DELETE FROM sigw_key_providers WHERE sigw_key_id = ? AND provider_key_id = ?",
+				"DELETE FROM sigw_key_providers WHERE sigw_key_id = ? AND provider = ?",
 			)
-			.bind(id, providerKeyId),
+			.bind(id, provider),
 		db
 			.prepare("UPDATE sigw_keys SET updated_at = ? WHERE id = ?")
 			.bind(now, id),
+		...deleteUnlinkedProviderKeys(db, [current.id], now),
 	]);
 }
 
@@ -631,21 +546,29 @@ export async function revokeSigwKey(
 }
 
 /**
- * sigw キーを削除する。無効化と同じく、発行した人と、結び付いたプロバイダキーの所有者ができる。
- * トークンのハッシュを、どのトークンとも一致しない値(deleted: と ID)にして、無効にする。目的などは残す
+ * sigw キーを削除する。無効化と同じ人ができる。
+ * トークンのハッシュを、どのトークンとも一致しない値(deleted: と ID)にして、無効にする。目的などは残す。
+ * 登録した API キーも、外して削除する(動いているセッションがあれば、暗号化したキーは Cron があとで消す)
  */
 export async function deleteSigwKey(
 	db: D1Database,
 	id: string,
 	actorId: string,
 ): Promise<void> {
-	await requireEditable(db, id, actorId);
+	const key = await requireEditable(db, id, actorId);
 	const now = Date.now();
-	await db
-		.prepare(
-			`UPDATE sigw_keys SET token_hash = 'deleted:' || id, deleted_at = ?, revoked_at = COALESCE(revoked_at, ?), updated_at = ?
-			 WHERE id = ? AND deleted_at IS NULL`,
-		)
-		.bind(now, now, now, id)
-		.run();
+	await db.batch([
+		db
+			.prepare(
+				`UPDATE sigw_keys SET token_hash = 'deleted:' || id, deleted_at = ?, revoked_at = COALESCE(revoked_at, ?), updated_at = ?
+				 WHERE id = ? AND deleted_at IS NULL`,
+			)
+			.bind(now, now, now, id),
+		db.prepare("DELETE FROM sigw_key_providers WHERE sigw_key_id = ?").bind(id),
+		...deleteUnlinkedProviderKeys(
+			db,
+			key.providerKeys.map((providerKey) => providerKey.id),
+			now,
+		),
+	]);
 }

@@ -27,7 +27,6 @@ import type {
 	CliTokenJson,
 	MeJson,
 	PriceRowJson,
-	ProviderKeyJson,
 	SettlementJson,
 	SettlementPreviewJson,
 	SigwKeyInput,
@@ -70,22 +69,16 @@ const HELP = `sigw の CLI ${VERSION}
   me                                  自分とメンバー、クライアントの base URL
   personal-token                      個人トークンを発行し直す
 
-  provider-keys                       プロバイダキーの一覧
-  provider-keys add --provider <openai|anthropic|xai|openrouter|typesafe> [--label 名前] [--delegated-only]
-                                      プロバイダキーを登録する(キーは標準入力から読む)。
-                                      --delegated-only: 代理専用(Bobert からの呼び出しでだけ使える)
-  provider-keys disable|enable <ID>   プロバイダキーを無効にする・有効に戻す
-  provider-keys delete <ID> [--yes]   プロバイダキーを削除する(結び付いた sigw キーから外れる。元には戻せない)
-
   keys                                sigw キーの一覧
   keys show <ID>                      sigw キーの詳細と今月の呼び出し
-  keys create --provider-key <ID>[,<ID>…] --purpose <目的> [--models a,b] [--limit USD] [--expires YYYY-MM-DD]
-                                      プロバイダキーは、プロバイダごとに1つずつ選べる
+  keys create --purpose <目的> [--models a,b] [--limit USD] [--expires YYYY-MM-DD]
+                                      sigw キーを発行する(API キーは、あとで set-provider で登録する)
   keys update <ID> [--purpose 目的] [--models a,b|""] [--limit USD|""] [--expires YYYY-MM-DD|""]
-  keys add-provider <ID> <プロバイダキーの ID>
-                                      sigw キーにプロバイダキーを足す(プロバイダごとに1つまで)
-  keys remove-provider <ID> <プロバイダキーの ID>
-                                      sigw キーからプロバイダキーを外す
+  keys set-provider <ID> <プロバイダ> [--delegated-only]
+                                      sigw キーに、そのプロバイダの API キーを登録する(キーは標準入力から読む。登録済みなら差し替える)
+                                      --delegated-only: 代理専用(Bobert からの呼び出しでだけ使える)
+  keys remove-provider <ID> <プロバイダ> [--yes]
+                                      sigw キーから、そのプロバイダの API キーを外して削除する(元には戻せない)
   keys revoke <ID>                    sigw キーを無効にする
   keys delete <ID> [--yes]            sigw キーを削除する(元には戻せない)
 
@@ -458,21 +451,21 @@ function keyInput(options: Options, base?: SigwKeyJson): SigwKeyInput {
 
 function printKeys(keys: SigwKeyJson[]): void {
 	table(
-		["ID", "目的", "状態", "プロバイダキー", "発行", "今月", "上限", "期限"],
+		["ID", "目的", "状態", "API キー", "発行", "今月", "上限", "期限"],
 		keys.map((key) => [
 			key.id,
 			key.purpose,
 			key.revokedAt !== null
 				? "無効"
 				: key.providerKeys.every((providerKey) => providerKey.disabled)
-					? "プロバイダキーが無効"
+					? "API キーが未登録"
 					: key.expiresAt !== null && key.expiresAt < Date.now()
 						? "期限切れ"
 						: "有効",
 			key.providerKeys
 				.map(
 					(providerKey) =>
-						`${providerKey.provider}/${providerKey.label}(${providerKey.ownerName})${providerKey.disabled ? "・無効" : ""}`,
+						`${providerKey.provider} 末尾 ${providerKey.keyLast4}(${providerKey.ownerName})${providerKey.disabled ? "・無効" : ""}`,
 				)
 				.join(", "),
 			key.createdByName,
@@ -547,8 +540,6 @@ async function main(): Promise<void> {
 		allowPositionals: true,
 		options: {
 			provider: { type: "string" },
-			label: { type: "string" },
-			"provider-key": { type: "string" },
 			purpose: { type: "string" },
 			models: { type: "string" },
 			limit: { type: "string" },
@@ -656,56 +647,6 @@ async function main(): Promise<void> {
 			);
 			return;
 		}
-		case "provider-keys": {
-			if (!sub) {
-				const keys = await call<ProviderKeyJson[]>("GET", "/provider-keys");
-				table(
-					["ID", "プロバイダ", "名前", "キー", "所有者", "sigw キー", "状態"],
-					keys.map((k) => [
-						k.id,
-						k.provider,
-						k.label,
-						k.keyHint,
-						k.ownerName,
-						k.activeSigwKeys,
-						[
-							k.disabledAt === null ? "有効" : "無効",
-							k.delegatedOnly ? "代理専用" : "",
-						]
-							.filter(Boolean)
-							.join("・"),
-					]),
-				);
-				return;
-			}
-			if (sub === "add") {
-				const provider = required(values, "provider");
-				const apiKey = await prompt(`${provider} の API キー: `);
-				const { id } = await call<{ id: string }>("POST", "/provider-keys", {
-					provider,
-					label: opt(values, "label") ?? "",
-					apiKey,
-					delegatedOnly: values["delegated-only"] === true,
-				});
-				console.log(`登録しました: ${id}`);
-				return;
-			}
-			if ((sub === "disable" || sub === "enable") && arg1) {
-				await call("POST", `/provider-keys/${arg1}/${sub}`);
-				console.log(sub === "disable" ? "無効にしました" : "有効に戻しました");
-				return;
-			}
-			if (sub === "delete" && arg1) {
-				if (!(await confirmDelete(values))) {
-					process.exitCode = 1;
-					return;
-				}
-				await call("POST", `/provider-keys/${arg1}/delete`);
-				console.log("削除しました");
-				return;
-			}
-			break;
-		}
 		case "keys": {
 			if (!sub) {
 				printKeys(await call<SigwKeyJson[]>("GET", "/sigw-keys"));
@@ -729,13 +670,7 @@ async function main(): Promise<void> {
 				const result = await call<{ id: string; token: string }>(
 					"POST",
 					"/sigw-keys",
-					{
-						...keyInput(values),
-						providerKeyIds: required(values, "provider-key")
-							.split(",")
-							.map((value) => value.trim())
-							.filter(Boolean),
-					},
+					keyInput(values),
 				);
 				console.log(result.token);
 				console.error(
@@ -749,16 +684,22 @@ async function main(): Promise<void> {
 				console.log("保存しました。反映まで最大30秒かかります。");
 				return;
 			}
-			if (sub === "add-provider" && arg1 && arg2) {
-				await call("POST", `/sigw-keys/${arg1}/provider-keys`, {
-					providerKeyId: arg2,
+			if (sub === "set-provider" && arg1 && arg2) {
+				const apiKey = await prompt(`${arg2} の API キー: `);
+				await call("PUT", `/sigw-keys/${arg1}/providers/${arg2}`, {
+					apiKey,
+					delegatedOnly: values["delegated-only"] === true,
 				});
-				console.log("足しました。反映まで最大30秒かかります。");
+				console.log("登録しました");
 				return;
 			}
 			if (sub === "remove-provider" && arg1 && arg2) {
-				await call("DELETE", `/sigw-keys/${arg1}/provider-keys/${arg2}`);
-				console.log("外しました。反映まで最大30秒かかります。");
+				if (!(await confirmDelete(values))) {
+					process.exitCode = 1;
+					return;
+				}
+				await call("DELETE", `/sigw-keys/${arg1}/providers/${arg2}`);
+				console.log("外しました");
 				return;
 			}
 			if (sub === "revoke" && arg1) {

@@ -1,15 +1,64 @@
-import type { ProviderKeyJson, SigwKeyInput, SigwKeyJson } from "@api/types.ts";
+import type {
+	SigwKeyApiKeyInput,
+	SigwKeyInput,
+	SigwKeyJson,
+} from "@api/types.ts";
 import { type FormEvent, useState } from "react";
 import { toDateString } from "@/app/format";
 import { useMe } from "@/app/me";
+import { useToast } from "@/app/toast";
 import { Button } from "@/components/ui/button";
 import { DatePicker } from "@/components/ui/date-picker";
-import { Form, Input, Select, Textarea } from "@/components/ui/form";
+import { Checkbox, Form, Input, Textarea } from "@/components/ui/form";
 import { Field } from "./field.tsx";
 
-/** プロバイダキーを選ぶときの表示。「メイン(あま) · 代理専用」 */
-export function providerKeyOptionLabel(key: ProviderKeyJson): string {
-	return `${key.label}(${key.ownerName})${key.delegatedOnly ? " · 代理専用" : ""}`;
+/** 代理専用のチェックボックスの説明。発行の画面と、詳細の画面の登録で同じものを使う */
+export const DELEGATED_ONLY_DESCRIPTION =
+	"Bobert からの呼び出しでだけ使えます。登録したあとは変えられません。";
+
+/** API キーの入力欄(パスワードの形)と、代理専用のチェックボックス */
+export function ApiKeyInput({
+	label,
+	hint,
+	apiKey,
+	delegatedOnly,
+	onChange,
+	required,
+}: {
+	label: string;
+	hint: string;
+	apiKey: string;
+	delegatedOnly: boolean;
+	onChange: (next: { apiKey: string; delegatedOnly: boolean }) => void;
+	required?: boolean;
+}) {
+	return (
+		<div className="space-y-2">
+			<Field label={label} hint={hint}>
+				{(id) => (
+					<Input
+						id={id}
+						type="password"
+						value={apiKey}
+						onChange={(event) =>
+							onChange({ apiKey: event.target.value, delegatedOnly })
+						}
+						autoComplete="off"
+						showPasswordToggle
+						required={required}
+					/>
+				)}
+			</Field>
+			<Checkbox
+				checked={delegatedOnly}
+				onChange={(event) =>
+					onChange({ apiKey, delegatedOnly: event.target.checked })
+				}
+				label="代理専用"
+				description={DELEGATED_ONLY_DESCRIPTION}
+			/>
+		</div>
+	);
 }
 
 function initialDate(ms: number | null | undefined): Date | null {
@@ -17,30 +66,26 @@ function initialDate(ms: number | null | undefined): Date | null {
 }
 
 /**
- * sigw キーの発行と変更に使うフォーム。providerKeys を渡すと、プロバイダキーを選べる(発行のとき)。
- * プロバイダキーは、プロバイダごとに1つずつ選ぶ。発行したあとの足し外しは、キーの詳細の画面でする
+ * sigw キーの発行と変更に使うフォーム。issuing なら、プロバイダごとに API キーを入れられる(発行のとき。1つ以上)。
+ * 発行したあとの登録・差し替え・外すは、キーの詳細の画面でする
  */
 export function SigwKeyForm({
 	initial,
-	providerKeys,
+	issuing = false,
 	submitLabel,
 	onSubmit,
 }: {
 	initial?: SigwKeyJson;
-	providerKeys?: ProviderKeyJson[];
+	issuing?: boolean;
 	submitLabel: string;
 	onSubmit: (input: SigwKeyInput) => Promise<void>;
 }) {
 	const { me } = useMe();
-	// プロバイダごとの選択。空の文字列は「使わない」。最初は、最初のプロバイダキーだけを選んでおく
-	const providers = me.providers.filter((provider) =>
-		providerKeys?.some((key) => key.provider === provider.id),
-	);
-	const [selected, setSelected] = useState<Record<string, string>>(() => {
-		const first = providerKeys?.[0];
-		return first ? { [first.provider]: first.id } : {};
-	});
-	const providerKeyIds = Object.values(selected).filter((id) => id !== "");
+	const toast = useToast();
+	// プロバイダごとの API キー。空のプロバイダは登録しない
+	const [apiKeys, setApiKeys] = useState<
+		Record<string, { apiKey: string; delegatedOnly: boolean }>
+	>({});
 	const [purpose, setPurpose] = useState(initial?.purpose ?? "");
 	const [models, setModels] = useState(
 		initial?.allowedModels?.join("\n") ?? "",
@@ -55,10 +100,21 @@ export function SigwKeyForm({
 
 	const submit = async (event: FormEvent) => {
 		event.preventDefault();
+		const entered: SigwKeyApiKeyInput[] = Object.entries(apiKeys)
+			.filter(([, value]) => value.apiKey.trim() !== "")
+			.map(([provider, value]) => ({
+				provider,
+				apiKey: value.apiKey.trim(),
+				delegatedOnly: value.delegatedOnly,
+			}));
+		if (issuing && entered.length === 0) {
+			toast("API キーを1つ以上入れてください。", "error");
+			return;
+		}
 		setBusy(true);
 		try {
 			await onSubmit({
-				providerKeyIds: providerKeys ? providerKeyIds : undefined,
+				apiKeys: issuing ? entered : undefined,
 				purpose,
 				allowedModels: models.split(/[\s,]+/).filter((value) => value !== ""),
 				monthlyLimitUsd: limit.trim() === "" ? null : Number(limit),
@@ -71,31 +127,18 @@ export function SigwKeyForm({
 
 	return (
 		<Form onSubmit={submit}>
-			{providerKeys &&
-				providers.map((provider) => (
-					<Field key={provider.id} label={`${provider.label} のプロバイダキー`}>
-						{(id) => (
-							<Select
-								id={id}
-								value={selected[provider.id] ?? ""}
-								onChange={(event) =>
-									setSelected((current) => ({
-										...current,
-										[provider.id]: event.target.value,
-									}))
-								}
-								options={[
-									{ value: "", label: "使わない" },
-									...providerKeys
-										.filter((key) => key.provider === provider.id)
-										.map((key) => ({
-											value: key.id,
-											label: providerKeyOptionLabel(key),
-										})),
-								]}
-							/>
-						)}
-					</Field>
+			{issuing &&
+				me.providers.map((provider) => (
+					<ApiKeyInput
+						key={provider.id}
+						label={`${provider.label} の API キー`}
+						hint="空なら、このプロバイダは呼べません。登録したあとは、末尾4文字しか表示しません。"
+						apiKey={apiKeys[provider.id]?.apiKey ?? ""}
+						delegatedOnly={apiKeys[provider.id]?.delegatedOnly ?? false}
+						onChange={(next) =>
+							setApiKeys((current) => ({ ...current, [provider.id]: next }))
+						}
+					/>
 				))}
 			<Field label="目的">
 				{(id) => (
@@ -159,12 +202,7 @@ export function SigwKeyForm({
 					</div>
 				)}
 			</Field>
-			<Button
-				type="submit"
-				isLoading={busy}
-				fullWidth
-				disabled={providerKeys !== undefined && providerKeyIds.length === 0}
-			>
+			<Button type="submit" isLoading={busy} fullWidth>
 				{submitLabel}
 			</Button>
 		</Form>

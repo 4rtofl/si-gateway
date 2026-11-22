@@ -34,38 +34,29 @@ export interface MeJson {
 	month: string;
 }
 
-export interface ProviderKeyJson {
-	id: string;
-	ownerId: string;
-	ownerName: string;
-	provider: ProviderIdJson;
-	label: string;
-	keyHint: string;
-	createdAt: number;
-	disabledAt: number | null;
-	/** 結び付いた、有効な sigw キーの数 */
-	activeSigwKeys: number;
-	/** 代理専用。このプロバイダキーを使う呼び出しは、Bobert からの代理の呼び出しでしか使えない */
-	delegatedOnly: boolean;
-}
-
-/** sigw キーに結び付いたプロバイダキー。sigw キー1つに、プロバイダごとに1つまで */
+/**
+ * sigw キーに登録した API キー(プロバイダキー)。sigw キー1つに、プロバイダごとに1つまで。
+ * キーそのものは返さず、末尾4文字だけを返す
+ */
 export interface LinkedProviderKeyJson {
 	/** プロバイダキーの ID */
 	id: string;
 	provider: ProviderIdJson;
-	label: string;
+	/** 末尾4文字 */
+	keyLast4: string;
+	/** 登録した人 */
 	ownerId: string;
 	ownerName: string;
 	/** プロバイダキーが無効。このプロバイダだけ呼べない */
 	disabled: boolean;
 	delegatedOnly: boolean;
+	/** 登録した時刻 */
 	linkedAt: number;
 }
 
 export interface SigwKeyJson {
 	id: string;
-	/** 結び付いたプロバイダキー。プロバイダの並び(openai、anthropic、xai、openrouter、typesafe)の順 */
+	/** 登録した API キー。プロバイダの並び(openai、anthropic、xai、openrouter、typesafe)の順 */
 	providerKeys: LinkedProviderKeyJson[];
 	createdBy: string;
 	createdByName: string;
@@ -78,16 +69,24 @@ export interface SigwKeyJson {
 	revokedAt: number | null;
 	/** 削除した時刻。削除したキーは、GET /sigw-keys?includeDeleted=1 でだけ返す */
 	deletedAt: number | null;
+	/** 呼び出した人が、設定の変更・無効化・削除と、API キーの登録・差し替え・外すをできるか */
+	editable: boolean;
 	/** 今月の使用額(全プロバイダの合計) */
 	monthSpendNano: number;
 	monthRequests: number;
 }
 
+/** sigw キーに登録する API キー。PUT /sigw-keys/:id/providers/:provider では provider を使わない(パスで決まる) */
+export interface SigwKeyApiKeyInput {
+	provider?: string;
+	apiKey?: string;
+	/** 代理専用。登録したあとは変えられない */
+	delegatedOnly?: boolean;
+}
+
 export interface SigwKeyInput {
-	/** 発行のときに結び付けるプロバイダキー。プロバイダごとに1つまで。変更(PATCH)では使わない */
-	providerKeyIds?: string[];
-	/** 前の形(プロバイダキーが1つ)。providerKeyIds がなければ使う */
-	providerKeyId?: string;
+	/** 発行のときに登録する API キー。プロバイダごとに1つまで。0個でもよい。変更(PATCH)では使わない */
+	apiKeys?: SigwKeyApiKeyInput[];
 	purpose: string;
 	/** 空の配列か null なら制限なし */
 	allowedModels: string[] | null;

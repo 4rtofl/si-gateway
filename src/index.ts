@@ -12,6 +12,7 @@
 
 import { WorkerEntrypoint } from "cloudflare:workers";
 import { handleApi } from "./api/router.ts";
+import { purgeDeletedProviderKeys } from "./db/keys.ts";
 import { purgeExpiredSessions } from "./db/sessions.ts";
 import { jstDayAndHour, monthOf, previousMonth } from "./lib/time.ts";
 import { repriceUnpriced, syncLiteLlmPrices } from "./pricing/store.ts";
@@ -79,7 +80,10 @@ export default {
 /** Managed Agents のセッションを読む Cron。wrangler.jsonc の triggers.crons と同じ文字列にする */
 export const AGENT_SESSIONS_CRON = "*/5 * * * *";
 
-/** 5分ごとに動く。Managed Agents のセッションの使用量を読み、増えた分を記録する(docs/design.md 5.3) */
+/**
+ * 5分ごとに動く。Managed Agents のセッションの使用量を読み、増えた分を記録する(docs/design.md 5.3)。
+ * そのあとで、削除したプロバイダキーのうち、セッションが終わったものの暗号化したキーを消す(3.3)
+ */
 export async function runAgentSessionsPoll(
 	env: Env,
 	now: number,
@@ -95,6 +99,17 @@ export async function runAgentSessionsPoll(
 		}
 	} catch (error) {
 		console.error("Managed Agents のセッションを読めませんでした", error);
+	}
+	// 削除したプロバイダキーのうち、セッションが終わったものから、暗号化したキーを消す(docs/design.md 3.3)
+	try {
+		const purged = await purgeDeletedProviderKeys(env.DB);
+		if (purged > 0) {
+			console.log(
+				`削除したプロバイダキー ${purged} 件の、暗号化したキーを消しました`,
+			);
+		}
+	} catch (error) {
+		console.error("削除したプロバイダキーを消せませんでした", error);
 	}
 }
 
