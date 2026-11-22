@@ -21,7 +21,8 @@ sigw は、Org のメンバー3人で LLM のクレジットを分け合うた�
 クライアント(SDK、Claude Code など)
    │  Authorization: Bearer sgk_….sgu_…
    ▼
-Cloudflare Worker「sigw」(Web UI・API は portal.sigw.4rtofl.org、中継は si.sigw.4rtofl.org)
+Cloudflare Worker「sigw」(Web UI・API は portal.sigw.4rtofl.org、中継は si.sigw.4rtofl.org、
+                         CLI のインストールスクリプトは cli.sigw.4rtofl.org)
    ├─ /openai/*  /anthropic/*  /xai/*  /openrouter/*   … 中継(src/proxy/)
    ├─ /api/*                                            … Web UI と CLI が使う JSON API(src/api/)
    ├─ /auth/*                                           … Discord OAuth(src/web/auth.ts)
@@ -193,14 +194,39 @@ Discord の OAuth2(scope は `identify`)でログインします。`ALLOWED_DISC
 
 ## 8. CLI
 
-`cli/sigw.ts` を Node.js 24 で直接動かします(ビルドなし)。CLI トークンで `/api/*` を呼びます。
+`cli/sigw.ts` を、Bun(`bun build --compile`)で OS ごとのネイティブのバイナリにして配ります。開発中は Node.js 24 で直接動かせます(`pnpm cli`)。CLI トークンで `/api/*` を呼びます。
+
+### 配り方
+
+- `cli-v0.1.0` の形のタグを push すると、`.github/workflows/release-cli.yml` が7種類のバイナリ(Linux の x64・arm64 と、それぞれの musl 版、macOS の x64・arm64、Windows の x64)と `SHA256SUMS` を GitHub Releases に置く。macOS 用は、アドホック署名を付けるため macOS で作る
+- cli.sigw.4rtofl.org(vars の `CLI_HOST`)は、`/install.sh`、`/install.ps1`、`/latest`(最新の版)だけを返す(`src/web/cli-dist.ts`)。最新の版は、GitHub の API の回数制限を避けるため `/releases/latest` のリダイレクト先から読み、5分キャッシュする
+- インストールスクリプトは OS と CPU を見てバイナリを選び、`SHA256SUMS` と照らしてから `~/.local/bin/sigw`(Windows は `%LOCALAPPDATA%\sigw\bin\sigw.exe`)に置く
+- `sigw update` も同じ手順で自分を置き換える
 
 ```sh
-pnpm cli login https://sigw.example.workers.dev   # CLI トークンを入れて保存
-pnpm cli keys
-pnpm cli keys create --provider-key <id> --purpose "記事要約" --limit 20 --models "gpt-5*"
-pnpm cli usage --month 2026-11 --by model
-pnpm cli settle preview 2026-11
+curl -fsSL https://cli.sigw.4rtofl.org/install.sh | sh
+sigw auth login
+```
+
+### ブラウザでのログイン(`sigw auth login`)
+
+OAuth 2.0 のデバイス認可(RFC 8628)と同じ流れです。手元のポートで待ち受けないので、SSH の先でも使えます。
+
+1. CLI が `POST /api/cli-login/start`(ログイン不要)を呼び、device code(CLI だけが持つ)と確認用のコード(`ABCD-EFGH`)を受け取る
+2. CLI がブラウザで `/cli/login?code=ABCD-EFGH` を開く。Web UI にログインしていなければ Discord でログインし、この画面に戻る
+3. 本人が、ターミナルと同じコードかを確かめて「許可」を押す(`POST /api/cli-login/:code/approve`)
+4. CLI は2秒ごとに `POST /api/cli-login/poll`(ログイン不要)で問い合わせ、許可されていれば CLI トークンを受け取る。トークンは1回しか渡さない
+
+- 期限は10分。期限内の手続きが20件を超えたら、新しく始めさせない(誰でも呼べる API なので)
+- 許可・拒否は Cookie のセッションでだけ受け付け、ほかの書き込みと同じく別のサイトからは受け付けない
+- ブラウザがない環境では、Web UI の「設定」で発行した CLI トークンを `sigw auth login --with-token` で入れられる
+- `sigw auth logout` は、手元の設定と一緒に、サーバーの CLI トークンも消す
+
+```sh
+sigw keys
+sigw keys create --provider-key <id> --purpose "記事要約" --limit 20 --models "gpt-5*"
+sigw usage --month 2026-11 --by model
+sigw settle preview 2026-11
 ```
 
 ## 9. データベース(D1)
@@ -209,6 +235,7 @@ pnpm cli settle preview 2026-11
 | --------------- | ------------------------------------------------------------------------------------- |
 | `users`         | Discord の ID、表示名、個人トークンのハッシュ                                         |
 | `sessions`      | Web UI のセッションと CLI トークン(どちらもハッシュ)                                  |
+| `cli_logins`    | CLI のブラウザでのログインの途中の状態(device code のハッシュ、確認用のコード)        |
 | `provider_keys` | プロバイダ、所有者、暗号化したキー(AES-GCM)、末尾4文字                                |
 | `sigw_keys`     | プロバイダキー、目的、トークンのハッシュ、制限、無効化した時刻                        |
 | `usage_events`  | 呼び出し1回が1行。利用者、sigw キー、所有者、モデル、トークン数、料金、状態、所要時間 |

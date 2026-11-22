@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { normalizeUserCode } from "../src/db/cli-logins.ts";
 import {
 	decryptText,
 	encryptText,
@@ -139,5 +140,13 @@ describe("日時", () => {
 	it("有効期限は、その日の終わり(日本時間)", () => {
 		expect(endOfJstDate("2026-12-31")).toBe(Date.UTC(2026, 11, 31, 15, 0) - 1);
 		expect(endOfJstDate("2026/12/31")).toBeNull();
+	});
+});
+
+describe("normalizeUserCode", () => {
+	it("小文字やハイフンなしの入力を、ABCD-EFGH の形にそろえる", () => {
+		expect(normalizeUserCode("bcdf-ghjk")).toBe("BCDF-GHJK");
+		expect(normalizeUserCode("bcdfghjk")).toBe("BCDF-GHJK");
+		expect(normalizeUserCode(" BCDF GHJK ")).toBe("BCDF-GHJK");
 	});
 });

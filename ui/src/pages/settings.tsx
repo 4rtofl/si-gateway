@@ -65,6 +65,7 @@ function PersonalToken() {
 }
 
 function CliTokens() {
+	const { me } = useMe();
 	const toast = useToast();
 	const tokens = useData<CliTokenJson[]>("/cli-tokens");
 	const [label, setLabel] = useState("");
@@ -95,6 +96,13 @@ function CliTokens() {
 	};
 	return (
 		<Section title="CLI トークン">
+			{me.cliOrigin && (
+				<div className="mb-4">
+					<CodeBlock
+						code={`curl -fsSL ${me.cliOrigin}/install.sh | sh\nsigw auth login`}
+					/>
+				</div>
+			)}
 			<Form
 				onSubmit={create}
 				className="mb-4 flex flex-wrap items-end gap-3 space-y-0"
@@ -119,7 +127,7 @@ function CliTokens() {
 				<div className="mb-4">
 					<SecretReveal
 						value={token}
-						note="このトークンは今だけ表示します。「pnpm cli login」で入れてください。"
+						note="このトークンは今だけ表示します。「sigw auth login --with-token」で入れてください。"
 					/>
 				</div>
 			)}

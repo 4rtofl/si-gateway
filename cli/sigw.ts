@@ -1,15 +1,29 @@
 #!/usr/bin/env node
 /*
- * sigw の CLI。Web UI の「設定」で発行した CLI トークンで、JSON API(/api/*)を呼ぶ。
- * Node.js 24 で、ビルドせずに「node cli/sigw.ts」(pnpm cli)として動く。
+ * sigw の CLI。CLI トークン(sgc_…)で JSON API(/api/*)を呼ぶ。
+ * - 配るときは Bun でネイティブのバイナリにする(.github/workflows/release-cli.yml)。
+ *   入れ方: curl -fsSL https://cli.sigw.4rtofl.org/install.sh | sh
+ * - 開発中は Node.js 24 で、ビルドせずに「node cli/sigw.ts」(pnpm cli)として動く
  */
 
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import {
+	chmod,
+	mkdir,
+	readFile,
+	rename,
+	rm,
+	writeFile,
+} from "node:fs/promises";
+import { homedir, hostname } from "node:os";
+import { dirname, join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import type {
+	CliLoginPollJson,
+	CliLoginStartJson,
 	CliTokenJson,
 	MeJson,
 	PriceRowJson,
@@ -23,6 +37,13 @@ import type {
 	UsageSummaryJson,
 } from "../src/api/types.ts";
 
+/** リリースのビルドで、bun build --define が版(0.1.0 など)に置き換える */
+declare const SIGW_VERSION: string | undefined;
+const VERSION = typeof SIGW_VERSION === "string" ? SIGW_VERSION : "dev";
+const DEFAULT_URL = "https://portal.sigw.4rtofl.org";
+const CLI_ORIGIN = "https://cli.sigw.4rtofl.org";
+const RELEASE_REPOSITORY = "4rtofl/si-gateway";
+
 const CONFIG_PATH = join(
 	process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"),
 	"sigw",
@@ -34,11 +55,18 @@ interface Config {
 	token: string;
 }
 
-const HELP = `sigw の CLI
+const HELP = `sigw の CLI ${VERSION}
 
-使い方: pnpm cli <コマンド> [引数]
+使い方: sigw <コマンド> [引数]
 
-  login <URL>                         CLI トークンを入れて保存する(${CONFIG_PATH})
+  auth login [--url URL] [--no-browser]
+                                      ブラウザで Discord にログインして、この端末を登録する
+  auth login --with-token [--url URL] CLI トークン(Web UI の「設定」で発行)を標準入力から入れる
+  auth status                         ログインしているユーザーと接続先
+  auth logout                         この端末の CLI トークンを消す
+  update                              sigw を最新の版にする
+  --version                           版を表示する
+
   me                                  自分とメンバー、クライアントの base URL
   personal-token                      個人トークンを発行し直す
 
@@ -67,6 +95,8 @@ const HELP = `sigw の CLI
   prices sync                         LiteLLM の価格表から同期する
 
   cli-tokens                          CLI トークンの一覧
+
+設定ファイル: ${CONFIG_PATH}(環境変数 SIGW_URL と SIGW_TOKEN でも指定できる)
 `;
 
 // ---- 設定と HTTP ----
@@ -81,7 +111,7 @@ async function loadConfig(): Promise<Config> {
 		return JSON.parse(await readFile(CONFIG_PATH, "utf8")) as Config;
 	} catch {
 		throw new Error(
-			"ログインしていません。「pnpm cli login <URL>」を実行するか、SIGW_URL と SIGW_TOKEN を設定してください",
+			"ログインしていません。「sigw auth login」を実行するか、SIGW_URL と SIGW_TOKEN を設定してください",
 		);
 	}
 }
@@ -127,6 +157,193 @@ async function prompt(question: string): Promise<string> {
 	} finally {
 		rl.close();
 	}
+}
+
+// ---- ログイン ----
+
+async function saveConfig(config: Config): Promise<void> {
+	await mkdir(dirname(CONFIG_PATH), { recursive: true });
+	await writeFile(CONFIG_PATH, JSON.stringify(config, null, 2), {
+		mode: 0o600,
+	});
+}
+
+function isWsl(): boolean {
+	try {
+		return /microsoft/i.test(readFileSync("/proc/version", "utf8"));
+	} catch {
+		return false;
+	}
+}
+
+/** 既定のブラウザで開く。開けそうにない環境(SSH の先など)では false */
+function openBrowser(url: string): boolean {
+	let command: string;
+	let args: string[];
+	if (process.platform === "darwin") {
+		[command, args] = ["open", [url]];
+	} else if (process.platform === "win32") {
+		[command, args] = ["rundll32", ["url.dll,FileProtocolHandler", url]];
+	} else if (isWsl()) {
+		[command, args] = ["rundll32.exe", ["url.dll,FileProtocolHandler", url]];
+	} else if (process.env.DISPLAY || process.env.WAYLAND_DISPLAY) {
+		[command, args] = ["xdg-open", [url]];
+	} else {
+		return false;
+	}
+	try {
+		const child = spawn(command, args, { stdio: "ignore", detached: true });
+		child.on("error", () => {});
+		child.unref();
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * ブラウザでのログイン(デバイス認可と同じ流れ)。
+ * CLI が確認用のコードを受け取り、ブラウザで開いた Web UI で本人が許可するのを待つ
+ */
+async function browserLogin(url: string, useBrowser: boolean): Promise<Config> {
+	const call = <T>(path: string, body: unknown) =>
+		request<T>({ url, token: "" }, "POST", path, body);
+	const started = await call<CliLoginStartJson>("/cli-login/start", {
+		clientName: hostname(),
+	});
+	const opened = useBrowser && openBrowser(started.verificationUrl);
+	console.error(
+		opened
+			? "ブラウザでログインの画面を開きました。開かないときは、次の URL を開いてください。"
+			: "ブラウザで次の URL を開いてください。",
+	);
+	console.error(`\n  ${started.verificationUrl}\n`);
+	console.error(
+		`画面に出るコードが ${started.userCode} と同じなら、「許可」を押してください。待っています…`,
+	);
+	while (Date.now() < started.expiresAt) {
+		await sleep(started.intervalMs);
+		const result = await call<CliLoginPollJson>("/cli-login/poll", {
+			deviceCode: started.deviceCode,
+		});
+		if (result.status === "approved") {
+			return { url, token: result.token };
+		}
+		if (result.status === "denied") {
+			throw new Error("ブラウザで拒否されました");
+		}
+		if (result.status === "expired") {
+			break;
+		}
+	}
+	throw new Error(
+		"時間切れです。もう一度「sigw auth login」を実行してください",
+	);
+}
+
+async function authLogin(options: Options): Promise<void> {
+	const url = (opt(options, "url") ?? process.env.SIGW_URL ?? DEFAULT_URL)
+		.trim()
+		.replace(/\/$/, "");
+	const config = options["with-token"]
+		? { url, token: await prompt("CLI トークン(sgc_…): ") }
+		: await browserLogin(url, !options["no-browser"]);
+	const me = await request<MeJson>(config, "GET", "/me");
+	await saveConfig(config);
+	console.log(`${me.user.name} としてログインしました(${CONFIG_PATH})`);
+}
+
+async function authLogout(): Promise<void> {
+	let config: Config;
+	try {
+		config = JSON.parse(await readFile(CONFIG_PATH, "utf8")) as Config;
+	} catch {
+		console.log("ログインしていません");
+		return;
+	}
+	try {
+		await request(config, "DELETE", "/cli-tokens/current");
+	} catch (error) {
+		// トークンがもう消されていても、手元の設定は消す
+		console.error(
+			`CLI トークンを消せませんでした(${error instanceof Error ? error.message : String(error)})`,
+		);
+	}
+	await rm(CONFIG_PATH, { force: true });
+	console.log("ログアウトしました");
+}
+
+// ---- 更新 ----
+
+/** この端末に合うリリースのファイル名(cli/install.sh の detect_asset と同じ) */
+function releaseAsset(): string {
+	const arch = { x64: "x64", arm64: "arm64" }[process.arch as string];
+	if (!arch) throw new Error(`この CPU(${process.arch})用の sigw はありません`);
+	switch (process.platform) {
+		case "darwin":
+			return `sigw-darwin-${arch}`;
+		case "win32":
+			return "sigw-windows-x64.exe";
+		case "linux": {
+			const musl =
+				existsSync("/lib") &&
+				readdirSync("/lib").some((name) => name.startsWith("ld-musl-"));
+			return `sigw-linux-${arch}${musl ? "-musl" : ""}`;
+		}
+		default:
+			throw new Error(`この OS(${process.platform})用の sigw はありません`);
+	}
+}
+
+async function fetchOk(url: string): Promise<Response> {
+	const response = await fetch(url);
+	if (!response.ok) {
+		throw new Error(`${url} を取得できません(HTTP ${response.status})`);
+	}
+	return response;
+}
+
+async function selfUpdate(): Promise<void> {
+	if (VERSION === "dev") {
+		throw new Error(
+			"ソースから動かしている sigw は更新できません。git pull してください",
+		);
+	}
+	const latest = (await (await fetchOk(`${CLI_ORIGIN}/latest`)).text()).trim();
+	if (latest === VERSION) {
+		console.log(`最新の版(${VERSION})です`);
+		return;
+	}
+	const asset = releaseAsset();
+	const base = `https://github.com/${RELEASE_REPOSITORY}/releases/download/cli-v${latest}`;
+	console.error(`${VERSION} から ${latest} にしています…`);
+	const [binary, sums] = await Promise.all([
+		fetchOk(`${base}/${asset}`).then((r) => r.arrayBuffer()),
+		fetchOk(`${base}/SHA256SUMS`).then((r) => r.text()),
+	]);
+	const expected = sums
+		.split("\n")
+		.map((line) => line.trim().split(/\s+\*?/))
+		.find(([, name]) => name === asset)?.[0];
+	const actual = createHash("sha256")
+		.update(new Uint8Array(binary))
+		.digest("hex");
+	if (!expected || expected !== actual) {
+		throw new Error("ダウンロードしたファイルのハッシュが合いません");
+	}
+	const target = process.execPath;
+	const next = `${target}.new`;
+	await writeFile(next, new Uint8Array(binary));
+	await chmod(next, 0o755);
+	if (process.platform === "win32") {
+		// 動いている exe は上書きできないが、名前は変えられる
+		await rm(`${target}.old`, { force: true });
+		await rename(target, `${target}.old`);
+	}
+	await rename(next, target);
+	console.log(`sigw ${latest} にしました`);
 }
 
 // ---- 表示 ----
@@ -324,29 +541,46 @@ async function main(): Promise<void> {
 			output: { type: "string" },
 			"cache-read": { type: "string" },
 			"cache-write": { type: "string" },
+			url: { type: "string" },
+			"with-token": { type: "boolean" },
+			"no-browser": { type: "boolean" },
 			help: { type: "boolean", short: "h" },
+			version: { type: "boolean", short: "v" },
 		},
 	});
 	const [command, sub, arg1, arg2] = positionals;
+	if (values.version || command === "version") {
+		console.log(VERSION);
+		return;
+	}
 	if (!command || values.help) {
 		console.log(HELP);
 		return;
 	}
-
-	if (command === "login") {
-		if (!sub)
-			throw new Error(
-				"URL を指定してください(例 pnpm cli login https://sigw.example.workers.dev)",
-			);
-		const token =
-			process.env.SIGW_TOKEN ?? (await prompt("CLI トークン(sgc_…): "));
-		const config = { url: sub.replace(/\/$/, ""), token };
-		const me = await request<MeJson>(config, "GET", "/me");
-		await mkdir(join(CONFIG_PATH, ".."), { recursive: true });
-		await writeFile(CONFIG_PATH, JSON.stringify(config, null, 2), {
-			mode: 0o600,
-		});
-		console.log(`${me.user.name} としてログインしました(${CONFIG_PATH})`);
+	if (command === "update") {
+		await selfUpdate();
+		return;
+	}
+	if (command === "auth" || command === "login" || command === "logout") {
+		const action = command === "auth" ? sub : command;
+		if (action === "login") {
+			// 前の形(sigw login <URL>)も受け付ける
+			if (command === "login" && sub) values.url = sub;
+			await authLogin(values);
+			return;
+		}
+		if (action === "logout") {
+			await authLogout();
+			return;
+		}
+		if (action === "status") {
+			const config = await loadConfig();
+			const me = await request<MeJson>(config, "GET", "/me");
+			console.log(`${me.user.name}(${me.user.id})  ${config.url}`);
+			return;
+		}
+		console.error(HELP);
+		process.exitCode = 1;
 		return;
 	}
 
@@ -586,7 +820,7 @@ async function main(): Promise<void> {
 					preview.settled
 						? "精算済みです。"
 						: preview.settleable
-							? "「pnpm cli settle run」で精算できます。"
+							? "「sigw settle run」で精算できます。"
 							: "まだ終わっていない月です。",
 				);
 				return;

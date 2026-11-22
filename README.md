@@ -6,8 +6,9 @@ Org の3人で LLM のクレジットを分け合うためのゲートウェイ�
 
 | ドメイン                 | 使い道                                  |
 | ------------------------ | --------------------------------------- |
-| `portal.sigw.4rtofl.org` | Web UI と CLI                           |
+| `portal.sigw.4rtofl.org` | Web UI と、CLI の接続先                 |
 | `si.sigw.4rtofl.org`     | LLM の呼び出し(クライアントの base URL) |
+| `cli.sigw.4rtofl.org`    | CLI のインストールスクリプト            |
 
 ## 使い方
 
@@ -53,15 +54,22 @@ export OPENAI_API_KEY=sgk_xxxx.sgu_yyyy
 
 ### CLI
 
-Web UI の「設定」で CLI トークン(`sgc_…`)を発行して使います。
-
 ```sh
-pnpm cli login https://portal.sigw.4rtofl.org
-pnpm cli keys
-pnpm cli usage --by model
-pnpm cli settle preview
-pnpm cli --help
+# macOS と Linux
+curl -fsSL https://cli.sigw.4rtofl.org/install.sh | sh
+# Windows(PowerShell)
+irm https://cli.sigw.4rtofl.org/install.ps1 | iex
+
+sigw auth login          # ブラウザが開くので、Discord でログインして「許可」を押す
+sigw keys
+sigw usage --by model
+sigw settle preview
+sigw update              # 最新の版にする
+sigw --help
 ```
+
+- `~/.local/bin/sigw` に入ります。場所は `SIGW_INSTALL_DIR` で変えられます
+- ブラウザがない環境では、Web UI の「設定」で発行した CLI トークンを `sigw auth login --with-token` で入れます。CI などでは、環境変数 `SIGW_URL` と `SIGW_TOKEN` でも指定できます
 
 ## デプロイ
 
@@ -95,7 +103,8 @@ pnpm typecheck
 
 - `src/`: Worker(中継、JSON API、ログイン、Cron)
 - `ui/`: Web UI(React、Vite、[easyui](https://easyui.site))
-- `cli/`: CLI(Node.js 24 でビルドせずに動く)
+- `cli/`: CLI と、そのインストールスクリプト。開発中は `pnpm cli <コマンド>` で、Node.js 24 でビルドせずに動く
+- CLI のリリース: `git tag cli-v0.1.0 && git push origin cli-v0.1.0` で、GitHub Actions がバイナリを作って GitHub Releases に置く
 - `migrations/`: D1 のスキーマ
 - 偽のプロバイダで中継を試すときは、`wrangler dev --var 'UPSTREAM_OVERRIDE:{"openai":"http://127.0.0.1:9999"}'` のように転送先を差し替える
 - `src/github/` は Daichoo(MPL-2.0)から、`ui/src/components/ui/` などは easyui(MIT)から持ってきたもの
