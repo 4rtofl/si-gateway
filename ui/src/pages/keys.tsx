@@ -94,7 +94,7 @@ function SigwKeySheet({
 						</div>
 					) : (
 						<SigwKeyForm
-							issuing
+							apiKeyMode="issue"
 							submitLabel="発行"
 							onSubmit={async (input) => {
 								try {
@@ -122,11 +122,79 @@ function SigwKeySheet({
 	);
 }
 
+/**
+ * 一覧から sigw キーを編集するシート。発行のシートと同じ形で、今の値を入れておく。
+ * 設定を保存してから、API キーを入れたプロバイダごとに登録・差し替えする。外すのは、キーの詳細の画面でする
+ */
+function SigwKeyEditSheet({
+	target,
+	open,
+	onOpenChange,
+	onSaved,
+}: {
+	target: SigwKeyJson | null;
+	open: boolean;
+	onOpenChange: (open: boolean) => void;
+	onSaved: () => Promise<void>;
+}) {
+	const toast = useToast();
+	return (
+		<Sheet open={open} onOpenChange={onOpenChange}>
+			<SheetContent>
+				<SheetHeader>
+					<SheetTitle>「{target?.purpose}」を編集</SheetTitle>
+				</SheetHeader>
+				<SheetBody>
+					{target && (
+						<SigwKeyForm
+							// 開くたびに、今の値から始める
+							key={`${target.id}:${open}`}
+							initial={target}
+							apiKeyMode="edit"
+							submitLabel="保存"
+							onSubmit={async ({ apiKeys, ...settings }) => {
+								// 設定を保存できたあとに失敗したら、一覧を読み直して今の状態を出す
+								let changed = false;
+								try {
+									await api(`/sigw-keys/${target.id}`, {
+										method: "PATCH",
+										body: settings,
+									});
+									changed = true;
+									for (const { provider, ...value } of apiKeys ?? []) {
+										await api(`/sigw-keys/${target.id}/providers/${provider}`, {
+											method: "PUT",
+											body: value,
+										});
+									}
+								} catch (error) {
+									toast(
+										error instanceof Error ? error.message : String(error),
+										"error",
+									);
+									if (changed) await onSaved();
+									return;
+								}
+								toast("保存しました。反映まで最大30秒かかります。");
+								onOpenChange(false);
+								await onSaved();
+							}}
+						/>
+					)}
+				</SheetBody>
+			</SheetContent>
+		</Sheet>
+	);
+}
+
 export function KeysPage() {
 	const { me } = useMe();
 	const toast = useToast();
 	const sigwKeys = useData<SigwKeyJson[]>("/sigw-keys");
 	const [sigwOpen, setSigwOpen] = useState(false);
+	// 編集するキー。閉じるあいだも中身を出しておくため、開いているかとは分けて持つ
+	const [editTarget, setEditTarget] = useState<SigwKeyJson | null>(null);
+	const [editOpen, setEditOpen] = useState(false);
 	const providerLabel = (id: string) =>
 		me.providers.find((provider) => provider.id === id)?.label ?? id;
 
@@ -191,13 +259,27 @@ export function KeysPage() {
 										limit={key.monthlyLimitNano}
 									/>
 									{key.editable && (
-										<Button
-											variant="destructive"
-											size="sm"
-											onClick={() => deleteSigwKey(key)}
-										>
-											削除
-										</Button>
+										<div className="flex items-center gap-2">
+											{key.revokedAt === null && (
+												<Button
+													variant="secondary"
+													size="sm"
+													onClick={() => {
+														setEditTarget(key);
+														setEditOpen(true);
+													}}
+												>
+													編集
+												</Button>
+											)}
+											<Button
+												variant="destructive"
+												size="sm"
+												onClick={() => deleteSigwKey(key)}
+											>
+												削除
+											</Button>
+										</div>
 									)}
 								</li>
 							);
@@ -210,6 +292,12 @@ export function KeysPage() {
 				open={sigwOpen}
 				onOpenChange={setSigwOpen}
 				onCreated={() => void sigwKeys.reload()}
+			/>
+			<SigwKeyEditSheet
+				target={editTarget}
+				open={editOpen}
+				onOpenChange={setEditOpen}
+				onSaved={sigwKeys.reload}
 			/>
 		</>
 	);
