@@ -181,6 +181,7 @@ export interface PriceJson {
 	outputAbove200k?: number;
 	cacheReadAbove200k?: number;
 	cacheWriteAbove200k?: number;
+	webSearch?: number;
 	tiers?: Record<string, Partial<PriceJson>>;
 }
 

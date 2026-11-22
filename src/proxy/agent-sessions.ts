@@ -150,6 +150,8 @@ export function sessionEvents(
 		cacheWriteTokens: totals.cacheWriteTokens - previous.cacheWriteTokens,
 		cacheWrite1hTokens: totals.cacheWrite1hTokens - previous.cacheWrite1hTokens,
 		outputTokens: totals.outputTokens - previous.outputTokens,
+		// セッションの usage には Web 検索の回数がないので、0 にする
+		webSearchRequests: 0,
 	};
 	const base = {
 		createdAt: context.createdAt,
@@ -204,6 +206,7 @@ export function sessionEvents(
 				cacheWriteTokens: 0,
 				cacheWrite1hTokens: 0,
 				outputTokens: 0,
+				webSearchRequests: 0,
 			},
 			costNano: runtimeNano,
 			costSource: "pricing",

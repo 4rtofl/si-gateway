@@ -16,6 +16,8 @@ export interface Usage {
 	cacheWrite1hTokens: number;
 	/** 出力(推論のトークンを含む) */
 	outputTokens: number;
+	/** サーバー側の Web 検索の回数(Anthropic の usage.server_tool_use.web_search_requests) */
+	webSearchRequests: number;
 }
 
 export interface UsageReport {
@@ -38,6 +40,7 @@ export function emptyUsage(): Usage {
 		cacheWriteTokens: 0,
 		cacheWrite1hTokens: 0,
 		outputTokens: 0,
+		webSearchRequests: 0,
 	};
 }
 
@@ -170,6 +173,13 @@ export class UsageCollector {
 		}
 		if (typeof usage.output_tokens === "number") {
 			current.outputTokens = usage.output_tokens;
+		}
+		// Web 検索の回数。message_start では0か書かれず、message_delta に累計が来る
+		const serverTools = isObject(usage.server_tool_use)
+			? usage.server_tool_use
+			: null;
+		if (serverTools && typeof serverTools.web_search_requests === "number") {
+			current.webSearchRequests = num(serverTools.web_search_requests);
 		}
 		if (typeof usage.service_tier === "string") {
 			this.report.serviceTier = usage.service_tier;

@@ -160,17 +160,18 @@ Bobert は `env.SIGW.fetch(url, init)` で呼びます。パスは公開の入�
 | `cache_read_tokens`                            | キャッシュから読んだ入力                                |
 | `cache_write_tokens` / `cache_write_1h_tokens` | キャッシュに書いた入力(Anthropic の5分と1時間)          |
 | `output_tokens`                                | 出力(推論のトークンを含む)                              |
+| `web_search_requests`                          | サーバー側の Web 検索の回数(Anthropic)                  |
 | `cost_nano_usd`                                | 料金(10⁻⁹ USD 単位の整数)                               |
 | `cost_source`                                  | `provider`(応答の実費)、`pricing`(単価表)、`null`(不明) |
 
-| プロバイダ                                | 取り出し方                                                                                                                          |
-| ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| OpenAI(Chat Completions、Embeddings など) | `usage.prompt_tokens` から `prompt_tokens_details.cached_tokens` を引いたものを入力にする。ストリーミングは最後のチャンクの `usage` |
-| OpenAI(Responses)                         | `response.completed` などのイベントの `response.usage`                                                                              |
-| Anthropic                                 | `message_start` の `usage` と、`message_delta` の `usage`(累計)を合わせる                                                           |
-| xAI                                       | OpenAI と同じ。`total_tokens` が入力と出力の和より大きければ、差を出力に足す(推論のトークン)                                        |
-| OpenRouter                                | OpenAI と同じ形。`usage.cost`(USD)を実費として使う                                                                                  |
-| TypeSafe                                  | 応答の JSON の `usage.input_tokens` と `usage.output_tokens`(Bobert が使う `POST /v1/systemone` は、ストリーミングしない)           |
+| プロバイダ                                | 取り出し方                                                                                                                              |
+| ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| OpenAI(Chat Completions、Embeddings など) | `usage.prompt_tokens` から `prompt_tokens_details.cached_tokens` を引いたものを入力にする。ストリーミングは最後のチャンクの `usage`     |
+| OpenAI(Responses)                         | `response.completed` などのイベントの `response.usage`                                                                                  |
+| Anthropic                                 | `message_start` の `usage` と、`message_delta` の `usage`(累計)を合わせる。Web 検索の回数は `usage.server_tool_use.web_search_requests` |
+| xAI                                       | OpenAI と同じ。`total_tokens` が入力と出力の和より大きければ、差を出力に足す(推論のトークン)                                            |
+| OpenRouter                                | OpenAI と同じ形。`usage.cost`(USD)を実費として使う                                                                                      |
+| TypeSafe                                  | 応答の JSON の `usage.input_tokens` と `usage.output_tokens`(Bobert が使う `POST /v1/systemone` は、ストリーミングしない)               |
 
 ### 5.2 単価表
 
@@ -179,7 +180,8 @@ Bobert は `env.SIGW.fetch(url, init)` で呼びます。パスは公開の入�
 - Web UI と CLI で、モデルごとの単価を手で決められる。手で決めた単価は、同期で上書きしない
 - モデル名は「完全一致 → 日付を外した名前 → 版の番号や `-latest` を外した名前」の順で探す(例: `jev-1.14.0` と `jev-latest` は `jev` で引く)
 - 入力が20万トークンを超えたときの単価、1時間キャッシュの単価、OpenAI の `service_tier`(flex・priority)の単価が表にあれば使う
-- 単価が見つからない呼び出しは、料金を空のまま記録する。単価を足したあと、毎日の Cron(と精算の直前)で料金を計算し直す
+- Anthropic の Web 検索は、回数に1回あたりの単価を掛けて、トークンの料金に足す(`cost_source` は `pricing` のまま)。単価は LiteLLM の `search_context_cost_per_query` を使い、なければ1回 $0.01(1,000回あたり $10)にする
+- 単価が見つからない呼び出しは、料金を空のまま記録する。Web 検索の料金も入れない。回数は記録するので、単価を足したあと、毎日の Cron(と精算の直前)で、検索の料金も含めて計算し直す
 
 ### 5.3 Managed Agents のセッション
 
@@ -188,7 +190,7 @@ Anthropic の Managed Agents(`/v1/agents`、`/v1/sessions` など)も、ほか�
 1. `POST /v1/sessions` の中継が成功したら、応答のセッション ID を `agent_sessions` に記録する。利用者、sigw キー、プロバイダキー、所有者、モデル(`agent.model.id`)、クライアントが送った `anthropic-beta`、入口(`via`)も一緒に残し、累計は0から始める。Bobert からの代理の呼び出し(4.5)で作ったセッションも、同じように記録する
 2. 5分ごとの Cron で、読む必要のあるセッションを `GET /v1/sessions/{id}` で読む。プロバイダキーはセッションを作ったときのもので、無効にしたキーも使う
 3. 累計から前回との差を出し、`usage_events` に2行まで足す。利用者と所有者、入口(`via`)は、セッションを作ったときの値にする
-   - トークンの行: `input_tokens`、`cache_read_input_tokens`、`cache_creation`(5分と1時間)、`output_tokens` の差を、セッションのモデルの単価で計算する。単価がなければ、ほかの呼び出しと同じく料金を空にして、あとで計算し直す
+   - トークンの行: `input_tokens`、`cache_read_input_tokens`、`cache_creation`(5分と1時間)、`output_tokens` の差を、セッションのモデルの単価で計算する。単価がなければ、ほかの呼び出しと同じく料金を空にして、あとで計算し直す。セッションの usage には Web 検索の回数がないので、`web_search_requests` は0にする
    - 実行時間の行: `usage.active_seconds` の差 × 1時間あたり $0.08。model は `managed-agents-runtime` にする
 4. `DELETE /v1/sessions/{id}` を中継する前に、最後の分を読んで記録する(method は `DELETE` で残す)。削除を遅らせないよう、待つのは3秒までにする。3秒を過ぎたら削除を中継し、読み終わるのを裏で待つ
 
@@ -317,6 +319,6 @@ sigw settle preview 2026-11
 ## 11. 割り切っていること
 
 - 上限額は最大30秒分ほど超えることがある(4.3)
-- 料金は単価表をもとにした見積もりで、プロバイダの請求と1円単位では一致しない。Web 検索などのツールの料金、画像や音声の秒単位の料金は、単価表にない限り数えない
+- 料金は単価表をもとにした見積もりで、プロバイダの請求と1円単位では一致しない。ツールの料金で数えるのは Anthropic の Web 検索だけ。ほかのツール(OpenAI の Web 検索、コードの実行など)の料金は数えない。画像や音声の秒単位の料金も、単価表にない限り数えない
 - Realtime API(WebSocket)とバッチ API は中継しない
 - Managed Agents のセッションの料金は、最大5分ほど遅れて記録される。その間は上限額の判定にも入らない。トークンの料金は、セッションの `agent.model` の単価だけで計算する。サブエージェントや advisor が別のモデルを使っても、その単価では数えない。累計の差は多くの呼び出しの合計なので、20万トークンを超えたときの単価は使わない

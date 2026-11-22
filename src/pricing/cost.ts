@@ -7,6 +7,9 @@ import type { Price } from "./types.ts";
 
 const LONG_CONTEXT_THRESHOLD = 200_000;
 
+/** Web 検索1回の単価(USD)。単価表になければ使う。Anthropic は1,000回あたり $10 */
+export const DEFAULT_WEB_SEARCH_PRICE = 0.01;
+
 /** 料金(nano USD)を計算する */
 export function computeCostNano(
 	usage: Usage,
@@ -38,7 +41,8 @@ export function computeCostNano(
 		usage.cacheReadTokens * cacheRead +
 		usage.cacheWriteTokens * cacheWrite +
 		usage.cacheWrite1hTokens * cacheWrite1h +
-		usage.outputTokens * output;
+		usage.outputTokens * output +
+		usage.webSearchRequests * (p.webSearch ?? DEFAULT_WEB_SEARCH_PRICE);
 	return Math.round(usd * 1e9);
 }
 

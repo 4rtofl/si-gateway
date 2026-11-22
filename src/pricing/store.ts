@@ -96,6 +96,7 @@ export function validatePrice(price: Price): Price {
 		"cacheRead",
 		"cacheWrite",
 		"cacheWrite1h",
+		"webSearch",
 	];
 	const clean: Price = { input: 0, output: 0 };
 	for (const field of fields) {
@@ -186,6 +187,18 @@ export function priceFromLiteLlm(entry: LiteLlmEntry): Price | null {
 		const value = price(entry, field);
 		if (value !== undefined) {
 			(result as unknown as Record<string, number>)[key] = value;
+		}
+	}
+	// Web 検索の単価は、検索の文脈の量(low・medium・high)ごとに書かれている。Anthropic はどれも同じなので medium を使う
+	const search = entry.search_context_cost_per_query;
+	if (typeof search === "object" && search !== null) {
+		const perQuery = search as LiteLlmEntry;
+		const value =
+			price(perQuery, "search_context_size_medium") ??
+			price(perQuery, "search_context_size_low") ??
+			price(perQuery, "search_context_size_high");
+		if (value !== undefined) {
+			result.webSearch = value;
 		}
 	}
 	const tiers: Record<string, Partial<Price>> = {};
@@ -285,7 +298,7 @@ export async function syncLiteLlmPrices(
 export async function repriceUnpriced(db: D1Database): Promise<number> {
 	const { results } = await db
 		.prepare(
-			`SELECT id, provider, path, model, input_tokens, cache_read_tokens, cache_write_tokens, cache_write_1h_tokens, output_tokens, service_tier
+			`SELECT id, provider, path, model, input_tokens, cache_read_tokens, cache_write_tokens, cache_write_1h_tokens, output_tokens, web_search_requests, service_tier
 			 FROM usage_events WHERE cost_nano_usd IS NULL LIMIT 2000`,
 		)
 		.all<{
@@ -298,6 +311,7 @@ export async function repriceUnpriced(db: D1Database): Promise<number> {
 			cache_write_tokens: number;
 			cache_write_1h_tokens: number;
 			output_tokens: number;
+			web_search_requests: number;
 			service_tier: string | null;
 		}>();
 	const updates: D1PreparedStatement[] = [];
@@ -320,6 +334,7 @@ export async function repriceUnpriced(db: D1Database): Promise<number> {
 				cacheWriteTokens: row.cache_write_tokens,
 				cacheWrite1hTokens: row.cache_write_1h_tokens,
 				outputTokens: row.output_tokens,
+				webSearchRequests: row.web_search_requests,
 			},
 			// Managed Agents のセッションの行は、累計の差なので長い入力の単価を使わない(src/proxy/agent-sessions.ts)
 			row.path.startsWith("/v1/sessions/") ? withoutLongContext(found) : found,

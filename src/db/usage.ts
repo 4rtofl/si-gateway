@@ -48,12 +48,12 @@ export function usageEventStatement(
 	when?: { sql: string; params: (string | number | null)[] },
 ): D1PreparedStatement {
 	const placeholders =
-		"?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?";
+		"?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?";
 	return db
 		.prepare(
 			`INSERT INTO usage_events (id, month, created_at, user_id, sigw_key_id, provider_key_id, owner_id, provider, method, path,
 				model, stream, status, input_tokens, cache_read_tokens, cache_write_tokens, cache_write_1h_tokens, output_tokens,
-				service_tier, cost_nano_usd, cost_source, incomplete, ttfb_ms, duration_ms, upstream_request_id, error, via)
+				web_search_requests, service_tier, cost_nano_usd, cost_source, incomplete, ttfb_ms, duration_ms, upstream_request_id, error, via)
 			 ${when ? `SELECT ${placeholders} WHERE ${when.sql}` : `VALUES (${placeholders})`}`,
 		)
 		.bind(
@@ -75,6 +75,7 @@ export function usageEventStatement(
 			event.usage.cacheWriteTokens,
 			event.usage.cacheWrite1hTokens,
 			event.usage.outputTokens,
+			event.usage.webSearchRequests,
 			event.serviceTier,
 			event.costNano,
 			event.costSource,
