@@ -296,7 +296,7 @@ export async function handleProxy(
 		return errorResponse(
 			provider,
 			400,
-			`この sigw キーには ${provider.label} のプロバイダキーがありません${linked.length > 0 ? `。この sigw キーで呼べるのは ${linked.map((id) => `/${id}`).join("、")} です` : ""}`,
+			`この sigw キーには ${provider.label} の API キーがありません${linked.length > 0 ? `。この sigw キーで呼べるのは ${linked.map((id) => `/${id}`).join("、")} です` : ""}`,
 			"invalid_request_error",
 		);
 	}
@@ -304,7 +304,7 @@ export async function handleProxy(
 		return errorResponse(
 			provider,
 			401,
-			`この sigw キーの ${provider.label} のプロバイダキーは無効になっています`,
+			`この sigw キーの ${provider.label} の API キーは無効になっています`,
 			"authentication_error",
 		);
 	}
@@ -314,7 +314,7 @@ export async function handleProxy(
 		return errorResponse(
 			provider,
 			403,
-			`この sigw キーの ${provider.label} のプロバイダキーは、Bobert からの代理の呼び出しでしか使えません`,
+			`この sigw キーの ${provider.label} の API キーは、Bobert からの代理の呼び出しでしか使えません`,
 			"permission_error",
 		);
 	}
