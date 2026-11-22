@@ -78,8 +78,13 @@ const HELP = `sigw の CLI ${VERSION}
 
   keys                                sigw キーの一覧
   keys show <ID>                      sigw キーの詳細と今月の呼び出し
-  keys create --provider-key <ID> --purpose <目的> [--models a,b] [--limit USD] [--expires YYYY-MM-DD]
+  keys create --provider-key <ID>[,<ID>…] --purpose <目的> [--models a,b] [--limit USD] [--expires YYYY-MM-DD]
+                                      プロバイダキーは、プロバイダごとに1つずつ選べる
   keys update <ID> [--purpose 目的] [--models a,b|""] [--limit USD|""] [--expires YYYY-MM-DD|""]
+  keys add-provider <ID> <プロバイダキーの ID>
+                                      sigw キーにプロバイダキーを足す(プロバイダごとに1つまで)
+  keys remove-provider <ID> <プロバイダキーの ID>
+                                      sigw キーからプロバイダキーを外す
   keys revoke <ID>                    sigw キーを無効にする
 
   usage [--month YYYY-MM] [--by user|pair|key|model]
@@ -457,12 +462,17 @@ function printKeys(keys: SigwKeyJson[]): void {
 			key.purpose,
 			key.revokedAt !== null
 				? "無効"
-				: key.providerKeyDisabled
+				: key.providerKeys.every((providerKey) => providerKey.disabled)
 					? "プロバイダキーが無効"
 					: key.expiresAt !== null && key.expiresAt < Date.now()
 						? "期限切れ"
 						: "有効",
-			`${key.provider}/${key.providerKeyLabel}(${key.ownerName})`,
+			key.providerKeys
+				.map(
+					(providerKey) =>
+						`${providerKey.provider}/${providerKey.label}(${providerKey.ownerName})${providerKey.disabled ? "・無効" : ""}`,
+				)
+				.join(", "),
 			key.createdByName,
 			usd(key.monthSpendNano),
 			key.monthlyLimitNano === null ? "なし" : usd(key.monthlyLimitNano),
@@ -700,7 +710,10 @@ async function main(): Promise<void> {
 					"/sigw-keys",
 					{
 						...keyInput(values),
-						providerKeyId: required(values, "provider-key"),
+						providerKeyIds: required(values, "provider-key")
+							.split(",")
+							.map((value) => value.trim())
+							.filter(Boolean),
 					},
 				);
 				console.log(result.token);
@@ -713,6 +726,18 @@ async function main(): Promise<void> {
 				const current = await call<SigwKeyJson>("GET", `/sigw-keys/${arg1}`);
 				await call("PATCH", `/sigw-keys/${arg1}`, keyInput(values, current));
 				console.log("保存しました。反映まで最大30秒かかります。");
+				return;
+			}
+			if (sub === "add-provider" && arg1 && arg2) {
+				await call("POST", `/sigw-keys/${arg1}/provider-keys`, {
+					providerKeyId: arg2,
+				});
+				console.log("足しました。反映まで最大30秒かかります。");
+				return;
+			}
+			if (sub === "remove-provider" && arg1 && arg2) {
+				await call("DELETE", `/sigw-keys/${arg1}/provider-keys/${arg2}`);
+				console.log("外しました。反映まで最大30秒かかります。");
 				return;
 			}
 			if (sub === "revoke" && arg1) {

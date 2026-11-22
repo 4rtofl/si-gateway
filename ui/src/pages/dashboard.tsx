@@ -95,7 +95,9 @@ export function DashboardPage() {
 		current.data.byKey.map((row) => [row.sigwKeyId, row.costNano]),
 	);
 	const activeKeys = keys.data.filter(
-		(key) => key.revokedAt === null && !key.providerKeyDisabled,
+		(key) =>
+			key.revokedAt === null &&
+			key.providerKeys.some((providerKey) => !providerKey.disabled),
 	);
 
 	return (

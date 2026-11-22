@@ -22,12 +22,26 @@ import { PageHeader, Section } from "@/parts/layout";
 import { SigwKeyForm } from "@/parts/sigw-key-form";
 import { LimitBar } from "@/parts/usage";
 
+/** sigw キーに結び付いたプロバイダキーを、1行で書く。「Anthropic · メイン(あま)、OpenRouter · メイン(…)」 */
+export function linkedProviderKeysText(
+	key: SigwKeyJson,
+	providerLabel: (id: string) => string,
+): string {
+	return key.providerKeys
+		.map(
+			(providerKey) =>
+				`${providerLabel(providerKey.provider)} · ${providerKey.label}(${providerKey.ownerName})${providerKey.disabled ? "・無効" : ""}`,
+		)
+		.join("、");
+}
+
 export function keyState(key: SigwKeyJson): {
 	label: string;
 	tone: "success" | "neutral" | "danger";
 } {
 	if (key.revokedAt !== null) return { label: "無効", tone: "neutral" };
-	if (key.providerKeyDisabled)
+	// 一部のプロバイダキーだけが無効なら、ほかのプロバイダは呼べるので「有効」のままにする
+	if (key.providerKeys.every((providerKey) => providerKey.disabled))
 		return { label: "プロバイダキーが無効", tone: "danger" };
 	if (key.expiresAt !== null && key.expiresAt < Date.now())
 		return { label: "期限切れ", tone: "danger" };
@@ -223,13 +237,15 @@ export function KeysPage() {
 	const [sigwOpen, setSigwOpen] = useState(false);
 	const activeProviderKeys =
 		providerKeys.data?.filter((key) => key.disabledAt === null) ?? [];
+	const providerLabel = (id: string) =>
+		me.providers.find((provider) => provider.id === id)?.label ?? id;
 
 	const toggleProviderKey = async (key: ProviderKeyJson) => {
 		const disable = key.disabledAt === null;
 		if (
 			disable &&
 			!window.confirm(
-				`${key.label} を無効にしますか？紐づく sigw キーもすべて使えなくなります。`,
+				`${key.label} を無効にしますか？このプロバイダキーが結び付いた sigw キーでは、このプロバイダを呼べなくなります。`,
 			)
 		) {
 			return;
@@ -345,12 +361,7 @@ export function KeysPage() {
 											<Badge tone={state.tone}>{state.label}</Badge>
 										</div>
 										<p className="text-xs text-[var(--text-muted)]">
-											{
-												me.providers.find(
-													(provider) => provider.id === key.provider,
-												)?.label
-											}{" "}
-											· {key.providerKeyLabel}({key.ownerName})
+											{linkedProviderKeysText(key, providerLabel)}
 										</p>
 									</div>
 									<LimitBar

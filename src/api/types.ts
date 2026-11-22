@@ -43,18 +43,30 @@ export interface ProviderKeyJson {
 	keyHint: string;
 	createdAt: number;
 	disabledAt: number | null;
+	/** 結び付いた、有効な sigw キーの数 */
 	activeSigwKeys: number;
-	/** 代理専用。これにつながる sigw キーは、Bobert からの代理の呼び出しでしか使えない */
+	/** 代理専用。このプロバイダキーを使う呼び出しは、Bobert からの代理の呼び出しでしか使えない */
 	delegatedOnly: boolean;
+}
+
+/** sigw キーに結び付いたプロバイダキー。sigw キー1つに、プロバイダごとに1つまで */
+export interface LinkedProviderKeyJson {
+	/** プロバイダキーの ID */
+	id: string;
+	provider: ProviderIdJson;
+	label: string;
+	ownerId: string;
+	ownerName: string;
+	/** プロバイダキーが無効。このプロバイダだけ呼べない */
+	disabled: boolean;
+	delegatedOnly: boolean;
+	linkedAt: number;
 }
 
 export interface SigwKeyJson {
 	id: string;
-	providerKeyId: string;
-	provider: ProviderIdJson;
-	providerKeyLabel: string;
-	ownerId: string;
-	ownerName: string;
+	/** 結び付いたプロバイダキー。プロバイダの並び(openai、anthropic、xai、openrouter、typesafe)の順 */
+	providerKeys: LinkedProviderKeyJson[];
 	createdBy: string;
 	createdByName: string;
 	purpose: string;
@@ -64,13 +76,15 @@ export interface SigwKeyJson {
 	expiresAt: number | null;
 	createdAt: number;
 	revokedAt: number | null;
-	providerKeyDisabled: boolean;
-	/** 今月の使用額 */
+	/** 今月の使用額(全プロバイダの合計) */
 	monthSpendNano: number;
 	monthRequests: number;
 }
 
 export interface SigwKeyInput {
+	/** 発行のときに結び付けるプロバイダキー。プロバイダごとに1つまで。変更(PATCH)では使わない */
+	providerKeyIds?: string[];
+	/** 前の形(プロバイダキーが1つ)。providerKeyIds がなければ使う */
 	providerKeyId?: string;
 	purpose: string;
 	/** 空の配列か null なら制限なし */

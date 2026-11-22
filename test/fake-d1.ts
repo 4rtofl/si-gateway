@@ -77,14 +77,29 @@ class FakeStatement {
 export class FakeD1 {
 	readonly sqlite: SqliteDatabase;
 
-	constructor() {
+	/**
+	 * before を渡すと、そのマイグレーション(例 "0007")の手前までだけを流す。
+	 * マイグレーションで行を移すテストでは、行を入れてから migrate() で残りを流す
+	 */
+	constructor(options: { before?: string } = {}) {
 		this.sqlite = new DatabaseSync(":memory:");
+		this.sqlite.exec("PRAGMA foreign_keys = ON");
+		this.migrate(options.before ? { before: options.before } : {});
+	}
+
+	private applied = new Set<string>();
+
+	/** まだ流していないマイグレーションを、名前の順に流す */
+	migrate(options: { before?: string } = {}): void {
 		const files = fs
 			.readdirSync(migrationsDir)
 			.filter((name) => name.endsWith(".sql"))
 			.sort();
 		for (const file of files) {
+			if (this.applied.has(file)) continue;
+			if (options.before && file >= options.before) break;
 			this.sqlite.exec(fs.readFileSync(new URL(file, migrationsDir), "utf8"));
+			this.applied.add(file);
 		}
 	}
 

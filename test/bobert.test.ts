@@ -8,6 +8,7 @@ import {
 import { handleBobertRequest } from "../src/proxy/bobert.ts";
 import { handleProxy } from "../src/proxy/handler.ts";
 import { PROVIDERS } from "../src/proxy/providers.ts";
+import { FakeD1 } from "./fake-d1.ts";
 
 const SECRET = "test-secret";
 const SIGW_TOKEN = "sgk_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -16,90 +17,48 @@ const MEMBER = "1148088717907595324";
 const OTHER_MEMBER = "687896063545180253";
 const PROVIDER_API_KEY = "sk-ant-real-provider-key";
 
-interface Insert {
-	sql: string;
-	args: unknown[];
-}
+/** 使用量の行。列の名前で引く */
+type Insert = Record<string, unknown>;
 
 /**
- * 中継が使う問い合わせだけに答える、D1 の代わり。
- * 認証の読み取り(sigw キー、利用者、今月の使用額)、単価表、使用量の書き込みを扱う
+ * 本番と同じスキーマの D1(FakeD1)に、メンバー2人と、Anthropic のプロバイダキー1つを結び付けた sigw キーを入れる。
+ * inserts() は、中継が書いた使用量の行
  */
 async function fakeDb(options: { delegatedOnly: boolean }) {
-	const sigwHash = await sha256Hex(SIGW_TOKEN);
-	const personalHash = await sha256Hex(PERSONAL_TOKEN);
-	const keyRow = {
-		id: "key-1",
-		purpose: "Bobert",
-		provider_key_id: "pk-1",
-		allowed_models: null,
-		monthly_limit_nano_usd: null,
-		expires_at: null,
-		revoked_at: null,
-		provider: "anthropic",
-		owner_id: OTHER_MEMBER,
-		encrypted_key: await encryptText(SECRET, PROVIDER_API_KEY),
-		disabled_at: null,
-		delegated_only: options.delegatedOnly ? 1 : 0,
+	const db = new FakeD1();
+	const now = Date.now();
+	db.rows(
+		"INSERT INTO users (id, name, personal_token_hash, created_at, updated_at) VALUES (?, 'A', ?, ?, ?), (?, 'B', NULL, ?, ?)",
+		MEMBER,
+		await sha256Hex(PERSONAL_TOKEN),
+		now,
+		now,
+		OTHER_MEMBER,
+		now,
+		now,
+	);
+	db.rows(
+		"INSERT INTO provider_keys (id, owner_id, provider, label, encrypted_key, key_hint, created_at, delegated_only) VALUES ('pk-1', ?, 'anthropic', 'k', ?, '…key', ?, ?)",
+		OTHER_MEMBER,
+		await encryptText(SECRET, PROVIDER_API_KEY),
+		now,
+		options.delegatedOnly ? 1 : 0,
+	);
+	db.rows(
+		"INSERT INTO sigw_keys (id, created_by, purpose, token_hash, token_hint, created_at, updated_at) VALUES ('key-1', ?, 'Bobert', ?, 'sgk_aaa…aaa', ?, ?)",
+		MEMBER,
+		await sha256Hex(SIGW_TOKEN),
+		now,
+		now,
+	);
+	db.rows(
+		"INSERT INTO sigw_key_providers (sigw_key_id, provider, provider_key_id, created_at) VALUES ('key-1', 'anthropic', 'pk-1', ?)",
+		now,
+	);
+	return {
+		db: db.asD1(),
+		inserts: (): Insert[] => db.rows("SELECT * FROM usage_events"),
 	};
-	const users = [
-		{ id: MEMBER, personal_token_hash: personalHash },
-		{ id: OTHER_MEMBER, personal_token_hash: null },
-	];
-	const inserts: Insert[] = [];
-	const answer = (sql: string, args: unknown[]): unknown[] => {
-		if (sql.includes("FROM sigw_keys s JOIN provider_keys p")) {
-			return args[0] === sigwHash ? [keyRow] : [];
-		}
-		if (sql.includes("FROM users WHERE personal_token_hash")) {
-			return users
-				.filter((user) => user.personal_token_hash === args[0])
-				.map(({ id }) => ({ id }));
-		}
-		if (sql.includes("FROM users WHERE id")) {
-			return users
-				.filter((user) => user.id === args[0])
-				.map(({ id }) => ({ id }));
-		}
-		if (sql.includes("SUM(cost_nano_usd)")) {
-			return [{ cost: 0 }];
-		}
-		if (sql.includes("FROM model_prices")) {
-			return [];
-		}
-		if (sql.startsWith("INSERT INTO usage_events")) {
-			inserts.push({ sql, args });
-			return [];
-		}
-		throw new Error(`想定していない問い合わせ: ${sql}`);
-	};
-	const prepare = (sql: string) => {
-		let args: unknown[] = [];
-		const statement = {
-			bind(...values: unknown[]) {
-				args = values;
-				return statement;
-			},
-			async all() {
-				return { results: answer(sql.trim(), args) };
-			},
-			async first() {
-				return answer(sql.trim(), args)[0] ?? null;
-			},
-			async run() {
-				answer(sql.trim(), args);
-				return { success: true };
-			},
-		};
-		return statement;
-	};
-	const db = {
-		prepare,
-		batch: (statements: { all(): Promise<unknown> }[]) =>
-			Promise.all(statements.map((statement) => statement.all())),
-		withSession: () => db,
-	};
-	return { db: db as unknown as D1Database, inserts };
 }
 
 function fakeCtx() {
@@ -151,11 +110,7 @@ function messagesRequest(headers: Record<string, string>): Request {
 
 /** 使用量の行の列の値を、列の名前で引く */
 function column(insert: Insert, name: string): unknown {
-	const columns = insert.sql
-		.slice(insert.sql.indexOf("(") + 1, insert.sql.indexOf(")"))
-		.split(",")
-		.map((part) => part.trim());
-	return insert.args[columns.indexOf(name)];
+	return insert[name];
 }
 
 describe("BobertGateway", () => {
@@ -176,8 +131,8 @@ describe("BobertGateway", () => {
 		expect(upstream?.headers.get("x-api-key")).toBe(PROVIDER_API_KEY);
 		expect(upstream?.headers.has("x-sigw-user")).toBe(false);
 
-		expect(inserts).toHaveLength(1);
-		const insert = inserts[0] as Insert;
+		expect(inserts()).toHaveLength(1);
+		const insert = inserts()[0] as Insert;
 		expect(column(insert, "user_id")).toBe(MEMBER);
 		expect(column(insert, "via")).toBe("bobert");
 	});
@@ -213,7 +168,7 @@ describe("BobertGateway", () => {
 		expect(body.type).toBe("error");
 		expect(body.error.type).toBe("authentication_error");
 		expect(upstreamCalls).toHaveLength(0);
-		expect(inserts).toHaveLength(0);
+		expect(inserts()).toHaveLength(0);
 	});
 
 	it("x-sigw-user か sigw キーがなければ断る", async () => {
@@ -279,7 +234,7 @@ describe("公開の入口", () => {
 		expect(response.status).toBe(200);
 		await settle();
 		expect(upstreamCalls[0]?.headers.has("x-sigw-user")).toBe(false);
-		const insert = inserts[0] as Insert;
+		const insert = inserts()[0] as Insert;
 		expect(column(insert, "user_id")).toBe(MEMBER);
 		expect(column(insert, "via")).toBeNull();
 	});

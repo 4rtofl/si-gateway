@@ -7,6 +7,7 @@
  * PROXY_HOST(si.sigw.4rtofl.org)では中継だけを受け付け、ほかのパスは 404 にする。
  * CLI_HOST(cli.sigw.4rtofl.org)では、CLI のインストールスクリプトだけを配る(src/web/cli-dist.ts)。
  * 名前付きのエントリポイント BobertGateway は、Bobert からの Service Binding だけが呼べる代理の入口(src/proxy/bobert.ts)。
+ * /sigw/key は BobertGateway でだけ答え、ここ(公開の入口)では 404 にする。
  */
 
 import { WorkerEntrypoint } from "cloudflare:workers";
@@ -15,7 +16,7 @@ import { purgeExpiredSessions } from "./db/sessions.ts";
 import { jstDayAndHour, monthOf, previousMonth } from "./lib/time.ts";
 import { repriceUnpriced, syncLiteLlmPrices } from "./pricing/store.ts";
 import { pollAgentSessions } from "./proxy/agent-sessions.ts";
-import { handleBobertRequest } from "./proxy/bobert.ts";
+import { handleBobertRequest, SIGW_KEY_PATH } from "./proxy/bobert.ts";
 import { handleProxy, upstreamOrigin } from "./proxy/handler.ts";
 import { matchProviderPath, PROVIDERS } from "./proxy/providers.ts";
 import { getSettlement, runSettlement } from "./settle/run.ts";
@@ -27,6 +28,10 @@ export default {
 		const url = new URL(request.url);
 		if (env.CLI_HOST && url.hostname === env.CLI_HOST) {
 			return handleCliHost(request, env, ctx);
+		}
+		// sigw キーの問い合わせは BobertGateway だけのもの。公開の入口では、Web UI の画面も返さずに 404 にする
+		if (url.pathname === SIGW_KEY_PATH) {
+			return Response.json({ error: "見つかりません" }, { status: 404 });
 		}
 		const provider = matchProviderPath(url.pathname);
 		if (provider) {

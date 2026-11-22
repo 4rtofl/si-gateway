@@ -164,9 +164,13 @@ beforeEach(async () => {
 		now,
 	);
 	db.rows(
-		"INSERT INTO sigw_keys (id, provider_key_id, created_by, purpose, token_hash, token_hint, created_at, updated_at) VALUES ('sk1', 'pk1', 'user1', 'Bobert', ?, 'aaaa', ?, ?)",
+		"INSERT INTO sigw_keys (id, created_by, purpose, token_hash, token_hint, created_at, updated_at) VALUES ('sk1', 'user1', 'Bobert', ?, 'aaaa', ?, ?)",
 		await sha256Hex(SIGW_TOKEN),
 		now,
+		now,
+	);
+	db.rows(
+		"INSERT INTO sigw_key_providers (sigw_key_id, provider, provider_key_id, created_at) VALUES ('sk1', 'anthropic', 'pk1', ?)",
 		now,
 	);
 	db.rows(
