@@ -351,12 +351,14 @@ route("POST", "/provider-keys", async ({ env, user, request }) => {
 		provider?: string;
 		label?: string;
 		apiKey?: string;
+		delegatedOnly?: boolean;
 	}>(request);
 	const id = await createProviderKey(env.DB, env.KEY_ENCRYPTION_SECRET, {
 		ownerId: user.id,
 		provider: String(input.provider ?? ""),
 		label: String(input.label ?? ""),
 		apiKey: String(input.apiKey ?? ""),
+		delegatedOnly: input.delegatedOnly === true,
 	});
 	return { id };
 });

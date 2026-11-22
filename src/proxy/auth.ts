@@ -1,5 +1,6 @@
 /*
  * 中継のときの認証。sigw キーと個人トークンから、使うプロバイダキーと利用者を決める。
+ * Bobert からの代理の呼び出し(BobertGateway)では、個人トークンの代わりに x-sigw-user の Discord ID で利用者を決める。
  *
  * ストリーミングを速くするため、D1 から読んだ結果を isolate のメモリに置く(stale-while-revalidate)。
  * - 読んでから30秒までは、そのまま使う
@@ -18,26 +19,51 @@ export const MAX_STALE_MS = 10 * 60_000;
 /** 見つからなかった結果を覚えておく時間。発行したばかりのキーがすぐ使えるよう短くする */
 const NEGATIVE_MS = 5_000;
 
-export interface Credential {
-	sigwToken: string;
-	personalToken: string;
-}
+/** 代理の呼び出しで、利用者の Discord ID を受け取るヘッダー。プロバイダには転送しない */
+export const DELEGATED_USER_HEADER = "x-sigw-user";
 
-/** ヘッダーから「sgk_….sgu_…」を取り出す。Authorization: Bearer と x-api-key の両方を見る */
-export function parseCredential(headers: Headers): Credential | null {
+/**
+ * 呼び出しの資格情報。公開の入口では個人トークンで、BobertGateway では Discord ID で利用者を決める
+ */
+export type Credential =
+	| { sigwToken: string; personalToken: string }
+	| { sigwToken: string; discordId: string };
+
+/** Authorization: Bearer か x-api-key の値を、「.」で区切った部分に分ける */
+function credentialParts(headers: Headers): string[] {
 	const authorization = headers.get("authorization");
 	const raw =
 		authorization?.match(/^Bearer\s+(.+)$/i)?.[1] ?? headers.get("x-api-key");
-	if (!raw) {
-		return null;
-	}
+	return raw ? raw.trim().split(".") : [];
+}
+
+/** ヘッダーから「sgk_….sgu_…」を取り出す。Authorization: Bearer と x-api-key の両方を見る */
+export function parseCredential(
+	headers: Headers,
+): { sigwToken: string; personalToken: string } | null {
 	let sigwToken: string | null = null;
 	let personalToken: string | null = null;
-	for (const part of raw.trim().split(".")) {
+	for (const part of credentialParts(headers)) {
 		if (part.startsWith("sgk_")) sigwToken = part;
 		else if (part.startsWith("sgu_")) personalToken = part;
 	}
 	return sigwToken && personalToken ? { sigwToken, personalToken } : null;
+}
+
+/**
+ * 代理の呼び出し(BobertGateway)のヘッダーから、sigw キーを取り出す。
+ * 個人トークンは使わないので、sgk_… のほかの部分は見ない
+ */
+export function parseDelegatedSigwToken(headers: Headers): string | null {
+	return (
+		credentialParts(headers).find((part) => part.startsWith("sgk_")) ?? null
+	);
+}
+
+/** x-sigw-user から Discord ID を取り出す。Discord の ID(数字だけ)の形でなければ null */
+export function parseDelegatedUser(headers: Headers): string | null {
+	const value = headers.get(DELEGATED_USER_HEADER)?.trim();
+	return value && /^\d{1,32}$/.test(value) ? value : null;
 }
 
 export interface KeyInfo {
@@ -53,6 +79,8 @@ export interface KeyInfo {
 	expiresAt: number | null;
 	/** sigw キーかプロバイダキーが無効になっている */
 	disabled: boolean;
+	/** プロバイダキーが代理専用。公開の入口では使えず、BobertGateway からだけ使える */
+	delegatedOnly: boolean;
 }
 
 interface Entry<T> {
@@ -112,13 +140,21 @@ interface KeyRow {
 	owner_id: string;
 	encrypted_key: string;
 	disabled_at: number | null;
+	delegated_only: number;
+}
+
+/** 利用者の引き方。個人トークンのハッシュか、Discord ID か */
+type UserLookup = { hash: string } | { id: string };
+
+function userCacheKey(lookup: UserLookup): string {
+	return "hash" in lookup ? `hash:${lookup.hash}` : `id:${lookup.id}`;
 }
 
 /** D1 から、sigw キー・利用者・今月の使用額を1回の往復で読む */
 async function load(
 	env: Env,
 	sigwHash: string,
-	userHash: string,
+	lookup: UserLookup,
 	month: string,
 ): Promise<LoadResult> {
 	// 読み取りだけなので、最寄りのレプリカから読んでよい
@@ -127,13 +163,15 @@ async function load(
 		db
 			.prepare(
 				`SELECT s.id, s.purpose, s.provider_key_id, s.allowed_models, s.monthly_limit_nano_usd, s.expires_at, s.revoked_at,
-					p.provider, p.owner_id, p.encrypted_key, p.disabled_at
+					p.provider, p.owner_id, p.encrypted_key, p.disabled_at, p.delegated_only
 				 FROM sigw_keys s JOIN provider_keys p ON p.id = s.provider_key_id WHERE s.token_hash = ?`,
 			)
 			.bind(sigwHash),
-		db
-			.prepare("SELECT id FROM users WHERE personal_token_hash = ?")
-			.bind(userHash),
+		"hash" in lookup
+			? db
+					.prepare("SELECT id FROM users WHERE personal_token_hash = ?")
+					.bind(lookup.hash)
+			: db.prepare("SELECT id FROM users WHERE id = ?").bind(lookup.id),
 		db
 			.prepare(
 				`SELECT COALESCE(SUM(cost_nano_usd), 0) AS cost FROM usage_events
@@ -158,6 +196,7 @@ async function load(
 			monthlyLimitNano: row.monthly_limit_nano_usd,
 			expiresAt: row.expires_at,
 			disabled: row.revoked_at !== null || row.disabled_at !== null,
+			delegatedOnly: row.delegated_only === 1,
 		};
 	}
 	return { key, userId: user?.id ?? null, spend };
@@ -165,7 +204,7 @@ async function load(
 
 function store(
 	sigwHash: string,
-	userHash: string,
+	userKey: string,
 	month: string,
 	result: LoadResult,
 	now: number,
@@ -175,7 +214,7 @@ function store(
 		fetchedAt: now,
 		refreshing: false,
 	});
-	userCache.set(userHash, {
+	userCache.set(userKey, {
 		value: result.userId,
 		fetchedAt: now,
 		refreshing: false,
@@ -196,13 +235,18 @@ export async function resolveCredential(
 	credential: Credential,
 	now = Date.now(),
 ): Promise<Resolved> {
-	const [sigwHash, userHash] = await Promise.all([
+	const [sigwHash, user] = await Promise.all([
 		sha256Hex(credential.sigwToken),
-		sha256Hex(credential.personalToken),
+		"personalToken" in credential
+			? sha256Hex(credential.personalToken).then(
+					(hash): UserLookup => ({ hash }),
+				)
+			: Promise.resolve<UserLookup>({ id: credential.discordId }),
 	]);
+	const userKey = userCacheKey(user);
 	const month = monthOf(now);
 	const keyEntry = keyCache.get(sigwHash);
-	const userEntry = userCache.get(userHash);
+	const userEntry = userCache.get(userKey);
 	const spendEntry = keyEntry?.value
 		? spendCache.get(`${keyEntry.value.sigwKeyId}:${month}`)
 		: undefined;
@@ -221,10 +265,8 @@ export async function resolveCredential(
 			userEntry.refreshing = true;
 			if (spendEntry) spendEntry.refreshing = true;
 			ctx.waitUntil(
-				load(env, sigwHash, userHash, month)
-					.then((result) =>
-						store(sigwHash, userHash, month, result, Date.now()),
-					)
+				load(env, sigwHash, user, month)
+					.then((result) => store(sigwHash, userKey, month, result, Date.now()))
 					.catch((error) => {
 						keyEntry.refreshing = false;
 						userEntry.refreshing = false;
@@ -241,8 +283,8 @@ export async function resolveCredential(
 		};
 	}
 
-	const result = await load(env, sigwHash, userHash, month);
-	store(sigwHash, userHash, month, result, now);
+	const result = await load(env, sigwHash, user, month);
+	store(sigwHash, userKey, month, result, now);
 	return {
 		key: result.key,
 		userId: result.userId,

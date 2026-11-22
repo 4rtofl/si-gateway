@@ -18,9 +18,9 @@ sigw は、Org のメンバー3人で LLM のクレジットを分け合うた�
 ## 2. 全体の構成
 
 ```
-クライアント(SDK、Claude Code など)
-   │  Authorization: Bearer sgk_….sgu_…
-   ▼
+クライアント(SDK、Claude Code など)           Bobert(Discord の bot の Worker)
+   │  Authorization: Bearer sgk_….sgu_…          │  Service Binding(entrypoint: BobertGateway)
+   ▼                                              ▼  x-api-key: sgk_…、x-sigw-user: Discord ID
 Cloudflare Worker「sigw」(Web UI・API は portal.sigw.4rtofl.org、中継は si.sigw.4rtofl.org、
                          CLI のインストールスクリプトは cli.sigw.4rtofl.org)
    ├─ /openai/*  /anthropic/*  /xai/*  /openrouter/*   … 中継(src/proxy/)
@@ -58,6 +58,7 @@ sgk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.sgu_yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
 - `Authorization: Bearer …` と `x-api-key: …` のどちらでも受け付ける。Anthropic の SDK は `x-api-key` を、OpenAI の SDK は `Authorization` を使うため
 - sigw キーだけ、または個人トークンだけでは呼び出せない。必ず利用者が決まる
 - DB にはどちらもハッシュ(SHA-256)だけを保存する。発行したときに一度だけ画面に出す
+- Bobert からの代理の呼び出しだけは、個人トークンを使わない(4.5)
 
 ### 3.2 sigw キーの設定
 
@@ -116,6 +117,33 @@ sgk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.sgu_yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
 - `Content-Encoding` と `Content-Length` は外して返す(fetch が展開した本文を返すため)
 - クライアントが途中で切断しても、`tee()` のもう片方は読み続けるので、多くの場合は最後の使用量まで受け取れる。受け取れなかったときは、届いた分だけを記録し、`incomplete` の印を付ける
 - バッチ API(`/v1/batches`、`/v1/messages/batches`)は、使用量を呼び出しのときに受け取れないので、403 で断る
+
+### 4.5 Bobert からの代理の呼び出し
+
+[Bobert](https://github.com/4rtofl/Bobert)(同じ Cloudflare アカウントの Discord の bot)は、利用者のプロバイダキーを持たず、LLM の呼び出しをすべて sigw に通します。Bobert は3人の代わりに呼び出すので、「誰が使ったか」は個人トークンではなく、Bobert から受け取ります。
+
+入口は、名前付きのエントリポイント `BobertGateway`(`WorkerEntrypoint`、`src/index.ts`)です。名前付きのエントリポイントは公開のドメインからは届かないので、Service Binding でしか呼べません。Bobert の `wrangler.jsonc` には、次の設定を入れます。
+
+```jsonc
+"services": [{ "binding": "SIGW", "service": "sigw", "entrypoint": "BobertGateway" }]
+```
+
+Bobert は `env.SIGW.fetch(url, init)` で呼びます。パスは公開の入口と同じです(例 `https://sigw/anthropic/v1/messages`)。ホストは見ません。
+
+| ヘッダー                               | 中身                                           |
+| -------------------------------------- | ---------------------------------------------- |
+| `x-api-key` か `Authorization: Bearer` | sigw キー(`sgk_…`)だけ。個人トークンは付けない |
+| `x-sigw-user`                          | 呼び出しを頼んだ利用者の Discord ID            |
+
+- 名乗れるのは `users` にいる人だけ。いなければ、プロバイダと同じ形の 401 を返す
+- `x-sigw-user` はプロバイダに転送しない。公開の入口では、このヘッダーを無視する(利用者は個人トークンで決める)
+- それ以外の確かめ方(有効期限、上限額、モデルの制限)と記録は、公開の入口と同じ。`usage_events.via` に `bobert` を入れ、Web UI と CLI の呼び出しの一覧で「Bobert」の印を出す
+
+#### 代理専用のプロバイダキー
+
+プロバイダキーは、登録するときに「代理専用」にできます(`provider_keys.delegated_only`)。代理専用のプロバイダキーにつながる sigw キーは、公開の入口(`sgk_….sgu_…`)では 403 で断り、`BobertGateway` からだけ使えます。登録したあとは変えられません。
+
+代理専用にする理由は、Bobert の Managed Agents が、利用者ごとの Vault(GitHub のトークン)をそのワークスペースに置くためです。同じワークスペースのキーを公開の入口から使えると、メンバーがほかの人の Vault を付けたセッションを作れてしまいます。そのため、Anthropic では、キーの持ち主が Bobert 専用のワークスペースを作り、そこで発行したキーを代理専用として登録します。
 
 ## 5. 使用量と料金
 
@@ -231,17 +259,17 @@ sigw settle preview 2026-11
 
 ## 9. データベース(D1)
 
-| テーブル        | 中身                                                                                  |
-| --------------- | ------------------------------------------------------------------------------------- |
-| `users`         | Discord の ID、表示名、個人トークンのハッシュ                                         |
-| `sessions`      | Web UI のセッションと CLI トークン(どちらもハッシュ)                                  |
-| `cli_logins`    | CLI のブラウザでのログインの途中の状態(device code のハッシュ、確認用のコード)        |
-| `provider_keys` | プロバイダ、所有者、暗号化したキー(AES-GCM)、末尾4文字                                |
-| `sigw_keys`     | プロバイダキー、目的、トークンのハッシュ、制限、無効化した時刻                        |
-| `usage_events`  | 呼び出し1回が1行。利用者、sigw キー、所有者、モデル、トークン数、料金、状態、所要時間 |
-| `model_prices`  | プロバイダとモデルごとの単価。出所(`litellm` か `manual`)                             |
-| `settlements`   | 精算した月、レート、台帳に書いた行                                                    |
-| `fx_overrides`  | 月ごとに手で決めた為替レート                                                          |
+| テーブル        | 中身                                                                                               |
+| --------------- | -------------------------------------------------------------------------------------------------- |
+| `users`         | Discord の ID、表示名、個人トークンのハッシュ                                                      |
+| `sessions`      | Web UI のセッションと CLI トークン(どちらもハッシュ)                                               |
+| `cli_logins`    | CLI のブラウザでのログインの途中の状態(device code のハッシュ、確認用のコード)                     |
+| `provider_keys` | プロバイダ、所有者、暗号化したキー(AES-GCM)、末尾4文字、代理専用かどうか                           |
+| `sigw_keys`     | プロバイダキー、目的、トークンのハッシュ、制限、無効化した時刻                                     |
+| `usage_events`  | 呼び出し1回が1行。利用者、sigw キー、所有者、モデル、トークン数、料金、状態、所要時間、入口(`via`) |
+| `model_prices`  | プロバイダとモデルごとの単価。出所(`litellm` か `manual`)                                          |
+| `settlements`   | 精算した月、レート、台帳に書いた行                                                                 |
+| `fx_overrides`  | 月ごとに手で決めた為替レート                                                                       |
 
 スキーマは `migrations/` にあります。
 
@@ -250,7 +278,8 @@ sigw settle preview 2026-11
 - プロバイダキーは、Worker のシークレット `KEY_ENCRYPTION_SECRET` で AES-GCM で暗号化して保存する。API と Web UI は、末尾4文字しか返さない
 - トークンはハッシュだけを保存する。いずれも 190 ビット程度の乱数なので、ソルトなしの SHA-256 で足りる
 - 中継の転送先は、手元での確認のときだけ `UPSTREAM_OVERRIDE`(JSON)で差し替えられる。本番では設定しない
-- 中継するとき、クライアントの `Authorization`、`x-api-key`、`Cookie`、Cloudflare が足したヘッダーは転送しない
+- 中継するとき、クライアントの `Authorization`、`x-api-key`、`x-sigw-user`、`Cookie`、Cloudflare が足したヘッダーは転送しない
+- Bobert が利用者を名乗れるのは、Service Binding の `BobertGateway` だけ。代理専用のプロバイダキーは、公開の入口では使えない(4.5)
 
 ## 11. 割り切っていること
 

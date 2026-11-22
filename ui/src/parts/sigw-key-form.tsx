@@ -68,7 +68,7 @@ export function SigwKeyForm({
 							onChange={(event) => setProviderKeyId(event.target.value)}
 							options={providerKeys.map((key) => ({
 								value: key.id,
-								label: `${providerLabel(key.provider)} · ${key.label}(${key.ownerName})`,
+								label: `${providerLabel(key.provider)} · ${key.label}(${key.ownerName})${key.delegatedOnly ? " · 代理専用" : ""}`,
 							}))}
 						/>
 					)}

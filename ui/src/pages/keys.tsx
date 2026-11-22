@@ -7,7 +7,7 @@ import { useToast } from "@/app/toast";
 import { useData } from "@/app/use-data";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Form, Input, Select } from "@/components/ui/form";
+import { Checkbox, Form, Input, Select } from "@/components/ui/form";
 import {
 	Sheet,
 	SheetBody,
@@ -48,6 +48,7 @@ function ProviderKeySheet({
 	const [provider, setProvider] = useState(me.providers[0]?.id ?? "openai");
 	const [label, setLabel] = useState("");
 	const [apiKey, setApiKey] = useState("");
+	const [delegatedOnly, setDelegatedOnly] = useState(false);
 	const [busy, setBusy] = useState(false);
 	const submit = async (event: FormEvent) => {
 		event.preventDefault();
@@ -55,11 +56,12 @@ function ProviderKeySheet({
 		try {
 			await api("/provider-keys", {
 				method: "POST",
-				body: { provider, label, apiKey },
+				body: { provider, label, apiKey, delegatedOnly },
 			});
 			toast("プロバイダキーを登録しました");
 			setApiKey("");
 			setLabel("");
+			setDelegatedOnly(false);
 			onOpenChange(false);
 			onCreated();
 		} catch (error) {
@@ -118,6 +120,12 @@ function ProviderKeySheet({
 								/>
 							)}
 						</Field>
+						<Checkbox
+							checked={delegatedOnly}
+							onChange={(event) => setDelegatedOnly(event.target.checked)}
+							label="代理専用"
+							description="Bobert からの呼び出しでだけ使えます。登録したあとは変えられません。"
+						/>
 						<Button type="submit" isLoading={busy} fullWidth>
 							登録
 						</Button>
@@ -275,6 +283,7 @@ export function KeysPage() {
 										<span className="font-mono text-xs text-[var(--text-muted)]">
 											{key.keyHint}
 										</span>
+										{key.delegatedOnly && <Badge>代理専用</Badge>}
 										{key.disabledAt !== null && <Badge>無効</Badge>}
 									</div>
 									<p className="text-xs text-[var(--text-muted)]">

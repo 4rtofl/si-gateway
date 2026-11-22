@@ -1,6 +1,7 @@
 /*
  * プロバイダへの中継。docs/design.md「4. 中継」
  * 応答の本文は tee() で2つに分け、片方をそのままクライアントに返し、もう片方から使用量を読む。
+ * 公開の入口と、Bobert からの代理の呼び出し(BobertGateway)の両方がここを通る。違うのは利用者の決め方だけ。
  */
 
 import { insertUsageEvent } from "../db/usage.ts";
@@ -8,8 +9,12 @@ import { computeCostNano, findPrice } from "../pricing/cost.ts";
 import { loadProviderPrices } from "../pricing/store.ts";
 import {
 	addSpend,
+	type Credential,
+	DELEGATED_USER_HEADER,
 	type KeyInfo,
 	parseCredential,
+	parseDelegatedSigwToken,
+	parseDelegatedUser,
 	resolveCredential,
 } from "./auth.ts";
 import { modelAllowed } from "./models.ts";
@@ -36,7 +41,16 @@ const DROP_REQUEST_HEADERS = new Set([
 	"keep-alive",
 	"te",
 	"upgrade",
+	// 代理の呼び出しの利用者。公開の入口に付いていても、無視して転送しない
+	DELEGATED_USER_HEADER,
 ]);
+
+/**
+ * 呼び出しが届いた入口。
+ * - public: 公開の入口(si.sigw.4rtofl.org など)。sgk_….sgu_… で利用者を決める
+ * - bobert: Bobert からの Service Binding(BobertGateway)。sgk_… と x-sigw-user の Discord ID で利用者を決める
+ */
+export type ProxyEntry = "public" | "bobert";
 
 type Json = Record<string, unknown>;
 
@@ -172,7 +186,48 @@ function upstreamOrigin(env: Env, provider: ProviderSpec): string {
 	}
 }
 
-/** 中継のリクエストを処理する。upstreamPath はプロバイダの API のパス(例 /v1/chat/completions) */
+/** 入口に合わせて資格情報を取り出す。取り出せなければ、返すエラーの応答 */
+function credentialFor(
+	request: Request,
+	provider: ProviderSpec,
+	entry: ProxyEntry,
+): Credential | Response {
+	if (entry === "public") {
+		return (
+			parseCredential(request.headers) ??
+			errorResponse(
+				provider,
+				401,
+				"API キーには「sigw キー.個人トークン」(sgk_….sgu_…)を入れてください",
+				"authentication_error",
+			)
+		);
+	}
+	const sigwToken = parseDelegatedSigwToken(request.headers);
+	if (!sigwToken) {
+		return errorResponse(
+			provider,
+			401,
+			"x-api-key か Authorization に sigw キー(sgk_…)を入れてください",
+			"authentication_error",
+		);
+	}
+	const discordId = parseDelegatedUser(request.headers);
+	if (!discordId) {
+		return errorResponse(
+			provider,
+			401,
+			"x-sigw-user に利用者の Discord ID を入れてください",
+			"authentication_error",
+		);
+	}
+	return { sigwToken, discordId };
+}
+
+/**
+ * 中継のリクエストを処理する。upstreamPath はプロバイダの API のパス(例 /v1/chat/completions)。
+ * entry は、呼び出しが届いた入口(公開の入口か、BobertGateway か)
+ */
 export async function handleProxy(
 	request: Request,
 	env: Env,
@@ -180,16 +235,12 @@ export async function handleProxy(
 	provider: ProviderSpec,
 	upstreamPath: string,
 	search: string,
+	entry: ProxyEntry = "public",
 ): Promise<Response> {
 	const startedAt = Date.now();
-	const credential = parseCredential(request.headers);
-	if (!credential) {
-		return errorResponse(
-			provider,
-			401,
-			"API キーには「sigw キー.個人トークン」(sgk_….sgu_…)を入れてください",
-			"authentication_error",
-		);
+	const credential = credentialFor(request, provider, entry);
+	if (credential instanceof Response) {
+		return credential;
 	}
 	if (isBlockedPath(provider, upstreamPath)) {
 		return errorResponse(
@@ -213,8 +264,20 @@ export async function handleProxy(
 		return errorResponse(
 			provider,
 			401,
-			"個人トークンが無効です",
+			entry === "public"
+				? "個人トークンが無効です"
+				: "x-sigw-user の利用者は sigw のメンバーではありません",
 			"authentication_error",
+		);
+	}
+	// 代理専用のプロバイダキーのワークスペースには、Bobert の利用者ごとの Vault がある。
+	// 公開の入口から使えると、ほかの人の Vault を付けたセッションを作れてしまうので断る
+	if (key.delegatedOnly && entry !== "bobert") {
+		return errorResponse(
+			provider,
+			403,
+			"この sigw キーは、Bobert からの代理の呼び出しでしか使えません",
+			"permission_error",
 		);
 	}
 	if (key.provider !== provider.id) {
@@ -279,6 +342,7 @@ export async function handleProxy(
 		requestModel: prepared.model,
 		stream: prepared.stream,
 		startedAt,
+		via: entry === "bobert" ? "bobert" : null,
 	};
 
 	let upstream: Response;
@@ -350,6 +414,8 @@ interface MeterContext {
 	requestModel: string | null;
 	stream: boolean;
 	startedAt: number;
+	/** 代理の呼び出しなら 'bobert'、公開の入口なら null */
+	via: "bobert" | null;
 }
 
 function emptyReport(): UsageReport {
@@ -452,5 +518,6 @@ async function record(
 		durationMs: Date.now() - meta.startedAt,
 		upstreamRequestId: requestId,
 		error,
+		via: meta.via,
 	});
 }

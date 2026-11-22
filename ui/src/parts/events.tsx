@@ -2,6 +2,7 @@ import type { SigwKeyJson, UsageEventJson } from "@api/types.ts";
 import { Link } from "react-router";
 import { formatDateTime, formatTokens } from "@/app/format";
 import { useMe } from "@/app/me";
+import { Badge } from "@/components/ui/badge";
 import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
 import { CostCell, StatusBadge } from "./usage.tsx";
 
@@ -32,6 +33,15 @@ export function EventsTable({
 			key: "userId",
 			header: "利用者",
 			accessor: (row) => nameOf(row.userId),
+			// Bobert からの代理の呼び出しには印を付ける
+			cell: (row) => (
+				<span className="flex items-center gap-1.5">
+					{nameOf(row.userId)}
+					{row.via === "bobert" && (
+						<Badge title="Bobert からの代理の呼び出し">Bobert</Badge>
+					)}
+				</span>
+			),
 			width: "1fr",
 		},
 		{
