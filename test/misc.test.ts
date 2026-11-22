@@ -9,7 +9,7 @@ import {
 } from "../src/lib/crypto.ts";
 import { endOfJstDate, monthOf, previousMonth } from "../src/lib/time.ts";
 import { parseCredential } from "../src/proxy/auth.ts";
-import { adjustRequestBody } from "../src/proxy/handler.ts";
+import { adjustRequestBody, errorResponse } from "../src/proxy/handler.ts";
 import { modelAllowed, parseModelPatterns } from "../src/proxy/models.ts";
 import {
 	isBlockedPath,
@@ -66,6 +66,10 @@ describe("プロバイダのパス", () => {
 		expect(matchProviderPath("/openrouter/api/v1/models")?.upstreamPath).toBe(
 			"/api/v1/models",
 		);
+		expect(matchProviderPath("/typesafe/v1/systemone")).toMatchObject({
+			provider: { id: "typesafe", origin: "https://api.typesafe.ai" },
+			upstreamPath: "/v1/systemone",
+		});
 		expect(matchProviderPath("/api/me")).toBeNull();
 		expect(matchProviderPath("/keys")).toBeNull();
 	});
@@ -104,11 +108,54 @@ describe("adjustRequestBody", () => {
 		expect(body.usage).toEqual({ include: true });
 	});
 
+	it("TypeSafe の本文は変えない", () => {
+		const body: Record<string, unknown> = { model: "jev-latest", state: {} };
+		expect(adjustRequestBody(PROVIDERS.typesafe, "/v1/systemone", body)).toBe(
+			false,
+		);
+	});
+
 	it("Anthropic の本文は変えない", () => {
 		const body: Record<string, unknown> = { model: "claude", stream: true };
 		expect(adjustRequestBody(PROVIDERS.anthropic, "/v1/messages", body)).toBe(
 			false,
 		);
+	});
+});
+
+describe("errorResponse", () => {
+	it("プロバイダに合わせた形でエラーを返す", async () => {
+		const openai = errorResponse(
+			PROVIDERS.openai,
+			401,
+			"だめ",
+			"authentication_error",
+		);
+		expect(await openai.json()).toEqual({
+			error: {
+				message: "[sigw] だめ",
+				type: "authentication_error",
+				code: "authentication_error",
+			},
+		});
+		const anthropic = errorResponse(
+			PROVIDERS.anthropic,
+			403,
+			"だめ",
+			"permission_error",
+		);
+		expect(await anthropic.json()).toEqual({
+			type: "error",
+			error: { type: "permission_error", message: "[sigw] だめ" },
+		});
+		const typesafe = errorResponse(
+			PROVIDERS.typesafe,
+			429,
+			"だめ",
+			"rate_limit_error",
+		);
+		expect(typesafe.status).toBe(429);
+		expect(await typesafe.json()).toEqual({ detail: "[sigw] だめ" });
 	});
 });
 

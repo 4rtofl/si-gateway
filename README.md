@@ -1,6 +1,6 @@
 # sigw
 
-Org の3人で LLM のクレジットを分け合うためのゲートウェイです。誰かが OpenAI・Anthropic・xAI・OpenRouter で買ったキーを sigw に登録すると、ほかのメンバーも sigw を通してそのキーを使えます。sigw は呼び出しごとに「誰が、何の目的で、誰のキーを使ったか」を記録し、毎月1日に、使った分を [Daichoo](https://github.com/4rtofl/Daichoo) の台帳に書き込みます。支払いの一覧は、Daichoo がいつもどおり Discord に送ります。
+Org の3人で LLM のクレジットを分け合うためのゲートウェイです。誰かが OpenAI・Anthropic・xAI・OpenRouter・TypeSafe で買ったキーを sigw に登録すると、ほかのメンバーも sigw を通してそのキーを使えます。sigw は呼び出しごとに「誰が、何の目的で、誰のキーを使ったか」を記録し、毎月1日に、使った分を [Daichoo](https://github.com/4rtofl/Daichoo) の台帳に書き込みます。支払いの一覧は、Daichoo がいつもどおり Discord に送ります。
 
 設計の詳細は [docs/design.md](docs/design.md) にあります。
 
@@ -41,6 +41,7 @@ export OPENAI_API_KEY=sgk_xxxx.sgu_yyyy
 | Anthropic  | `https://si.sigw.4rtofl.org/anthropic`         |
 | xAI        | `https://si.sigw.4rtofl.org/xai/v1`            |
 | OpenRouter | `https://si.sigw.4rtofl.org/openrouter/api/v1` |
+| TypeSafe   | `https://si.sigw.4rtofl.org/typesafe/v1`       |
 
 - 各プロバイダの API をそのまま中継するので、SDK もプロバイダ固有の機能も、そのまま使えます
 - バッチ API と Realtime API は、使用量を記録できないので使えません
@@ -58,6 +59,7 @@ export OPENAI_API_KEY=sgk_xxxx.sgu_yyyy
 
 - 「精算」で、前の月のプレビューを見たり、為替レートを手で決めたり、手で精算したりできます
 - 料金が不明な呼び出し(単価表にないモデル)は精算に入りません。「価格」で単価を足すと、料金を計算し直します
+- TypeSafe の単価は LiteLLM の価格表にないので、毎日の同期では入りません。Jev(`jev`)の単価(2026-11-04 時点で、入力は100万トークンあたり $0.042、出力は無料)は最初から入れてあります。単価が変わったら「価格」で直してください
 
 ### CLI
 

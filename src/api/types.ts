@@ -3,7 +3,12 @@
  * 金額は nano USD(10^-9 USD)の整数、時刻は UNIX ミリ秒。
  */
 
-export type ProviderIdJson = "openai" | "anthropic" | "xai" | "openrouter";
+export type ProviderIdJson =
+	| "openai"
+	| "anthropic"
+	| "xai"
+	| "openrouter"
+	| "typesafe";
 
 export interface MemberJson {
 	id: string;
