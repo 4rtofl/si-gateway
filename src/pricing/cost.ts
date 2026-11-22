@@ -43,6 +43,20 @@ export function computeCostNano(
 }
 
 /**
+ * 20万トークンを超えたときの単価を外した単価。Managed Agents のセッションの使用量は、
+ * 多くの呼び出しの累計の差なので、合計が20万を超えても1回の呼び出しが長いとは限らない
+ */
+export function withoutLongContext(price: Price): Price {
+	return {
+		...price,
+		inputAbove200k: undefined,
+		outputAbove200k: undefined,
+		cacheReadAbove200k: undefined,
+		cacheWriteAbove200k: undefined,
+	};
+}
+
+/**
  * 単価表でモデルを探すときの候補。完全一致のあと、日付を外した名前を試す。
  * 例: claude-sonnet-4-5-20250929 → claude-sonnet-4-5、gpt-4o-2024-08-06 → gpt-4o
  */

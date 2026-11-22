@@ -8,7 +8,7 @@ import {
 	PROVIDERS,
 	type ProviderId,
 } from "../proxy/providers.ts";
-import { computeCostNano, findPrice } from "./cost.ts";
+import { computeCostNano, findPrice, withoutLongContext } from "./cost.ts";
 import type { Price, PriceRow } from "./types.ts";
 
 export const LITELLM_PRICES_URL =
@@ -282,12 +282,13 @@ export async function syncLiteLlmPrices(
 export async function repriceUnpriced(db: D1Database): Promise<number> {
 	const { results } = await db
 		.prepare(
-			`SELECT id, provider, model, input_tokens, cache_read_tokens, cache_write_tokens, cache_write_1h_tokens, output_tokens, service_tier
+			`SELECT id, provider, path, model, input_tokens, cache_read_tokens, cache_write_tokens, cache_write_1h_tokens, output_tokens, service_tier
 			 FROM usage_events WHERE cost_nano_usd IS NULL LIMIT 2000`,
 		)
 		.all<{
 			id: string;
 			provider: string;
+			path: string;
 			model: string | null;
 			input_tokens: number;
 			cache_read_tokens: number;
@@ -317,7 +318,8 @@ export async function repriceUnpriced(db: D1Database): Promise<number> {
 				cacheWrite1hTokens: row.cache_write_1h_tokens,
 				outputTokens: row.output_tokens,
 			},
-			found,
+			// Managed Agents のセッションの行は、累計の差なので長い入力の単価を使わない(src/proxy/agent-sessions.ts)
+			row.path.startsWith("/v1/sessions/") ? withoutLongContext(found) : found,
 			row.service_tier,
 		);
 		updates.push(statement.bind(cost, row.id));

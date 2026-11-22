@@ -35,12 +35,26 @@ export async function insertUsageEvent(
 	db: D1Database,
 	event: UsageEventInput,
 ): Promise<void> {
-	await db
+	await usageEventStatement(db, event).run();
+}
+
+/**
+ * usage_events に1行を足す文。when を渡すと、その条件(SQL の式)が真のときだけ足す
+ * (Managed Agents のセッションの料金を、二重に記録しないため)
+ */
+export function usageEventStatement(
+	db: D1Database,
+	event: UsageEventInput,
+	when?: { sql: string; params: (string | number | null)[] },
+): D1PreparedStatement {
+	const placeholders =
+		"?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?";
+	return db
 		.prepare(
 			`INSERT INTO usage_events (id, month, created_at, user_id, sigw_key_id, provider_key_id, owner_id, provider, method, path,
 				model, stream, status, input_tokens, cache_read_tokens, cache_write_tokens, cache_write_1h_tokens, output_tokens,
 				service_tier, cost_nano_usd, cost_source, incomplete, ttfb_ms, duration_ms, upstream_request_id, error, via)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 ${when ? `SELECT ${placeholders} WHERE ${when.sql}` : `VALUES (${placeholders})`}`,
 		)
 		.bind(
 			newId(),
@@ -70,8 +84,8 @@ export async function insertUsageEvent(
 			event.upstreamRequestId,
 			event.error ? event.error.slice(0, 500) : null,
 			event.via,
-		)
-		.run();
+			...(when?.params ?? []),
+		);
 }
 
 export type UsageGroup = "user" | "owner" | "user_owner" | "key" | "model";

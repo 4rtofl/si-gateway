@@ -44,6 +44,7 @@ export OPENAI_API_KEY=sgk_xxxx.sgu_yyyy
 
 - 各プロバイダの API をそのまま中継するので、SDK もプロバイダ固有の機能も、そのまま使えます
 - バッチ API と Realtime API は、使用量を記録できないので使えません
+- Anthropic の Managed Agents(`/v1/sessions` など)も使えます。料金はセッションの中で発生するので、sigw が5分ごとにセッションの使用量を読んで記録します。トークンの料金に加えて、実行時間に1時間あたり $0.08 がかかります
 
 ### Bobert から使う
 

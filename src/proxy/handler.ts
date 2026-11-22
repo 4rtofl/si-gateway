@@ -4,9 +4,17 @@
  * 公開の入口と、Bobert からの代理の呼び出し(BobertGateway)の両方がここを通る。違うのは利用者の決め方だけ。
  */
 
+import { touchAgentSession } from "../db/agent-sessions.ts";
 import { insertUsageEvent } from "../db/usage.ts";
 import { computeCostNano, findPrice } from "../pricing/cost.ts";
 import { loadProviderPrices } from "../pricing/store.ts";
+import {
+	afterSessionDelete,
+	finalizeBeforeDelete,
+	isSessionDelete,
+	recordCreatedSession,
+	sessionIdOf,
+} from "./agent-sessions.ts";
 import {
 	addSpend,
 	type Credential,
@@ -171,7 +179,7 @@ function upstreamHeaders(
 }
 
 /** 転送先のオリジン。UPSTREAM_OVERRIDE(手元での確認用)があれば、そちらを使う */
-function upstreamOrigin(env: Env, provider: ProviderSpec): string {
+export function upstreamOrigin(env: Env, provider: ProviderSpec): string {
 	if (!env.UPSTREAM_OVERRIDE) {
 		return provider.origin;
 	}
@@ -343,19 +351,37 @@ export async function handleProxy(
 		stream: prepared.stream,
 		startedAt,
 		via: entry === "bobert" ? "bobert" : null,
+		createsAgentSession:
+			provider.id === "anthropic" &&
+			request.method === "POST" &&
+			upstreamPath === "/v1/sessions",
+		anthropicBeta: request.headers.get("anthropic-beta"),
 	};
+
+	// Managed Agents のセッション(docs/design.md 5.3)。利用者は resolved で決まっているので、
+	// どの入口(公開の入口でも BobertGateway でも)から来たリクエストでも同じように記録する
+	const origin = upstreamOrigin(env, provider);
+	const agentSessionId =
+		provider.id === "anthropic" ? sessionIdOf(upstreamPath) : null;
+	const deletesAgentSession =
+		agentSessionId !== null && isSessionDelete(request.method, upstreamPath);
+	if (agentSessionId && deletesAgentSession) {
+		await finalizeBeforeDelete(
+			{ env, origin, apiKey: key.apiKey },
+			ctx,
+			agentSessionId,
+			startedAt,
+		);
+	}
 
 	let upstream: Response;
 	try {
-		upstream = await fetch(
-			`${upstreamOrigin(env, provider)}${upstreamPath}${search}`,
-			{
-				method: request.method,
-				headers: upstreamHeaders(request, provider, key.apiKey),
-				body: prepared.body,
-				redirect: "manual",
-			},
-		);
+		upstream = await fetch(`${origin}${upstreamPath}${search}`, {
+			method: request.method,
+			headers: upstreamHeaders(request, provider, key.apiKey),
+			body: prepared.body,
+			redirect: "manual",
+		});
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		ctx.waitUntil(record(meta, 502, null, emptyReport(), null, message));
@@ -367,6 +393,16 @@ export async function handleProxy(
 		);
 	}
 	const ttfbMs = Date.now() - startedAt;
+	if (agentSessionId) {
+		ctx.waitUntil(
+			(deletesAgentSession
+				? afterSessionDelete(env, agentSessionId, upstream.status)
+				: touchAgentSession(env.DB, agentSessionId, startedAt)
+			).catch((error) => {
+				console.error("セッションの記録を更新できませんでした", error);
+			}),
+		);
+	}
 
 	const headers = new Headers(upstream.headers);
 	headers.delete("content-encoding");
@@ -416,6 +452,9 @@ interface MeterContext {
 	startedAt: number;
 	/** 代理の呼び出しなら 'bobert'、公開の入口なら null */
 	via: "bobert" | null;
+	/** POST /v1/sessions(Managed Agents のセッションを作る) */
+	createsAgentSession: boolean;
+	anthropicBeta: string | null;
 }
 
 function emptyReport(): UsageReport {
@@ -448,6 +487,21 @@ async function meter(
 			report = collectFromJson(text, meta.provider.usageStyle);
 			if (status >= 400) {
 				error = text.slice(0, 500);
+			} else if (meta.createsAgentSession) {
+				await recordCreatedSession(meta.env, text, {
+					userId: meta.userId,
+					sigwKeyId: meta.key.sigwKeyId,
+					providerKeyId: meta.key.providerKeyId,
+					ownerId: meta.key.ownerId,
+					anthropicBeta: meta.anthropicBeta,
+					via: meta.via,
+					now: meta.startedAt,
+				}).catch((error) => {
+					console.error(
+						"Managed Agents のセッションを記録できませんでした",
+						error,
+					);
+				});
 			}
 		} else {
 			// 音声や画像のファイルなど。使用量は読めないので、読み捨てる
