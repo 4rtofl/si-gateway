@@ -1,13 +1,13 @@
 /*
- * 1つの sigw キーに、プロバイダごとにプロバイダキーを結び付ける(migrations/0007、docs/design.md 3.2)。
- * マイグレーションでの移し替え、中継でのプロバイダキーの選び方、発行したあとの足し外し、BobertGateway の GET /sigw/key
+ * 1つの sigw キーに、プロバイダごとに API キー(プロバイダキー)を登録する(migrations/0007、docs/design.md 3.2)。
+ * マイグレーションでの移し替え、中継でのプロバイダキーの選び方、API キーの登録・差し替え・外す、BobertGateway の GET /sigw/key
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { handleApi } from "../src/api/router.ts";
 import type { SigwKeyJson } from "../src/api/types.ts";
 import { createSession } from "../src/db/sessions.ts";
-import { encryptText, sha256Hex } from "../src/lib/crypto.ts";
+import { decryptText, encryptText, sha256Hex } from "../src/lib/crypto.ts";
 import { clearAuthCache } from "../src/proxy/auth.ts";
 import { handleBobertRequest } from "../src/proxy/bobert.ts";
 import { handleProxy } from "../src/proxy/handler.ts";
@@ -335,16 +335,10 @@ describe("中継でのプロバイダキーの選び方", () => {
 	});
 });
 
-describe("sigw キーのプロバイダキーの足し外し(API)", () => {
+describe("sigw キーの API キーの登録・差し替え・外す(API)", () => {
 	async function apiSetup() {
 		const db = new FakeD1();
 		await seedUsers(db);
-		await seedProviderKey(db, "pk-ant", U2, "anthropic");
-		await seedProviderKey(db, "pk-ant2", U3, "anthropic");
-		await seedProviderKey(db, "pk-ts", U2, "typesafe");
-		await seedProviderKey(db, "pk-or", U3, "openrouter");
-		await seedProviderKey(db, "pk-oai", U3, "openai");
-		await seedProviderKey(db, "pk-xai", U3, "xai", { disabled: true });
 		const env = {
 			DB: db.asD1(),
 			KEY_ENCRYPTION_SECRET: SECRET,
@@ -377,6 +371,7 @@ describe("sigw キーのプロバイダキーの足し外し(API)", () => {
 			);
 			return {
 				status: response.status,
+				text: await response.clone().text(),
 				body: (await response.json()) as Record<string, unknown>,
 			};
 		};
@@ -386,176 +381,359 @@ describe("sigw キーのプロバイダキーの足し外し(API)", () => {
 			monthlyLimitUsd: null,
 			expiresOn: null,
 		};
-		return { db, call, settings };
+		/** U1 が、Anthropic の API キーだけを入れて発行した sigw キー */
+		const issue = async () => {
+			const created = await call(U1, "POST", "/sigw-keys", {
+				...settings,
+				apiKeys: [{ provider: "anthropic", apiKey: "sk-ant-first-AAAA" }],
+			});
+			expect(created.status).toBe(200);
+			return {
+				id: String(created.body.id),
+				token: String(created.body.token),
+			};
+		};
+		const get = async (user: string, id: string) =>
+			(await call(user, "GET", `/sigw-keys/${id}`))
+				.body as unknown as SigwKeyJson;
+		const decrypt = async (providerKeyId: string) => {
+			const [row] = db.rows(
+				"SELECT encrypted_key FROM provider_keys WHERE id = ?",
+				providerKeyId,
+			);
+			return decryptText(SECRET, String(row?.encrypted_key));
+		};
+		return { db, env, call, settings, issue, get, decrypt };
 	}
 
-	it("発行のときに、プロバイダごとに1つずつ結び付ける", async () => {
-		const { call, settings } = await apiSetup();
+	it("発行のときに、プロバイダごとに API キーを登録する。発行した人が所有者になり、キーの中身は返さない", async () => {
+		const { db, call, settings, get, decrypt } = await apiSetup();
 		const created = await call(U1, "POST", "/sigw-keys", {
 			...settings,
-			providerKeyIds: ["pk-or", "pk-ant"],
+			apiKeys: [
+				{ provider: "openrouter", apiKey: "sk-or-secret-WXYZ" },
+				{
+					provider: "anthropic",
+					apiKey: "  sk-ant-secret-abcd  ",
+					delegatedOnly: true,
+				},
+			],
 		});
 		expect(created.status).toBe(200);
-		const key = (await call(U1, "GET", `/sigw-keys/${created.body.id}`))
-			.body as unknown as SigwKeyJson;
-		// プロバイダの並びの順
-		expect(key.providerKeys.map((item) => [item.provider, item.id])).toEqual([
-			["anthropic", "pk-ant"],
-			["openrouter", "pk-or"],
-		]);
-		expect(key.providerKeys[0]?.ownerName).toBe("U2");
-
-		const twoAnthropic = await call(U1, "POST", "/sigw-keys", {
-			...settings,
-			providerKeyIds: ["pk-ant", "pk-ant2"],
-		});
-		expect(twoAnthropic.status).toBe(400);
-		const none = await call(U1, "POST", "/sigw-keys", {
-			...settings,
-			providerKeyIds: [],
-		});
-		expect(none.status).toBe(400);
-		const disabled = await call(U1, "POST", "/sigw-keys", {
-			...settings,
-			providerKeyIds: ["pk-xai"],
-		});
-		expect(disabled.status).toBe(400);
-		// 前の形(providerKeyId)も受け付ける
-		const legacy = await call(U1, "POST", "/sigw-keys", {
-			...settings,
-			providerKeyId: "pk-oai",
-		});
-		expect(legacy.status).toBe(200);
-
-		const providerKeys = (await call(U1, "GET", "/provider-keys"))
-			.body as unknown as { id: string; activeSigwKeys: number }[];
+		const id = String(created.body.id);
+		const key = await get(U1, id);
+		// プロバイダの並びの順。末尾4文字と登録した人だけを返す
 		expect(
-			providerKeys.find((item) => item.id === "pk-ant")?.activeSigwKeys,
-		).toBe(1);
+			key.providerKeys.map((item) => [
+				item.provider,
+				item.keyLast4,
+				item.ownerName,
+				item.delegatedOnly,
+				item.disabled,
+			]),
+		).toEqual([
+			["anthropic", "abcd", "U1", true, false],
+			["openrouter", "WXYZ", "U1", false, false],
+		]);
+		expect(key.editable).toBe(true);
+		const listed = await call(U1, "GET", "/sigw-keys");
+		expect(listed.text).not.toContain("secret");
+		expect((await call(U1, "GET", `/sigw-keys/${id}`)).text).not.toContain(
+			"secret",
+		);
+		// プロバイダキーの行は、sigw キーの目的を名前にして、暗号化して保存する
+		const rows = db.rows(
+			"SELECT id, owner_id, provider, label, key_hint, delegated_only FROM provider_keys ORDER BY provider",
+		);
+		expect(
+			rows.map((row) => [
+				row.provider,
+				row.owner_id,
+				row.label,
+				row.key_hint,
+				row.delegated_only,
+			]),
+		).toEqual([
+			["anthropic", U1, "Bobert", "…abcd", 1],
+			["openrouter", U1, "Bobert", "…WXYZ", 0],
+		]);
+		expect(await decrypt(String(rows[0]?.id))).toBe("sk-ant-secret-abcd");
 	});
 
-	it("発行した人は誰のキーでも、所有者は自分のキーだけを足せる", async () => {
-		const { db, call, settings } = await apiSetup();
-		const { body } = await call(U1, "POST", "/sigw-keys", {
+	it("発行のときの API キーは、プロバイダごとに1つまで。0個でも発行できる。前の CLI の形は断る", async () => {
+		const { db, call, settings, get } = await apiSetup();
+		const twoAnthropic = await call(U1, "POST", "/sigw-keys", {
+			...settings,
+			apiKeys: [
+				{ provider: "anthropic", apiKey: "sk-ant-1-aaaaaa" },
+				{ provider: "anthropic", apiKey: "sk-ant-2-bbbbbb" },
+			],
+		});
+		expect(twoAnthropic.status).toBe(400);
+		const unknown = await call(U1, "POST", "/sigw-keys", {
+			...settings,
+			apiKeys: [{ provider: "gemini", apiKey: "sk-gem-aaaaaaaa" }],
+		});
+		expect(unknown.status).toBe(400);
+		const short = await call(U1, "POST", "/sigw-keys", {
+			...settings,
+			apiKeys: [{ provider: "anthropic", apiKey: "short" }],
+		});
+		expect(short.status).toBe(400);
+		expect(db.rows("SELECT COUNT(*) AS n FROM sigw_keys")).toEqual([{ n: 0 }]);
+		expect(db.rows("SELECT COUNT(*) AS n FROM provider_keys")).toEqual([
+			{ n: 0 },
+		]);
+
+		// CLI(sigw keys create)は API キーなしで発行し、あとで set-provider で登録する
+		const empty = await call(U1, "POST", "/sigw-keys", settings);
+		expect(empty.status).toBe(200);
+		expect((await get(U1, String(empty.body.id))).providerKeys).toEqual([]);
+
+		const legacy = await call(U1, "POST", "/sigw-keys", {
 			...settings,
 			providerKeyIds: ["pk-ant"],
 		});
-		const id = String(body.id);
-		const add = (user: string, providerKeyId: string) =>
-			call(user, "POST", `/sigw-keys/${id}/provider-keys`, { providerKeyId });
-
-		// U3 は発行した人でも、結び付いたキーの所有者でもない
-		expect((await add(U3, "pk-or")).status).toBe(403);
-		// U2(Anthropic の所有者)は、ほかの人のキーを足せない
-		expect((await add(U2, "pk-or")).status).toBe(403);
-		// U2 は自分のキーを足せる
-		expect((await add(U2, "pk-ts")).status).toBe(200);
-		// 発行した人は、ほかの人のキーを足せる
-		expect((await add(U1, "pk-or")).status).toBe(200);
-		// 同じプロバイダは1つまで。無効なキーは足せない
-		expect((await add(U1, "pk-ant2")).status).toBe(400);
-		expect((await add(U1, "pk-xai")).status).toBe(400);
-		expect((await add(U1, "pk-nope")).status).toBe(404);
-		// U3 は OpenRouter の所有者になったので、自分のキーを足せる
-		expect((await add(U3, "pk-oai")).status).toBe(200);
-
-		expect(
-			db
-				.rows(
-					"SELECT provider FROM sigw_key_providers WHERE sigw_key_id = ? ORDER BY provider",
-					id,
-				)
-				.map((row) => row.provider),
-		).toEqual(["anthropic", "openai", "openrouter", "typesafe"]);
+		expect(legacy.status).toBe(400);
 	});
 
-	it("外せるのは、発行した人と、そのキーの所有者。最後の1つは外せない", async () => {
-		const { call, settings } = await apiSetup();
-		const { body } = await call(U1, "POST", "/sigw-keys", {
-			...settings,
-			providerKeyIds: ["pk-ant", "pk-or"],
-		});
-		const id = String(body.id);
-		const remove = (user: string, providerKeyId: string) =>
-			call(user, "DELETE", `/sigw-keys/${id}/provider-keys/${providerKeyId}`);
-
-		expect((await remove(U2, "pk-or")).status).toBe(403);
-		expect((await remove(U3, "pk-or")).status).toBe(200);
-		expect((await remove(U1, "pk-or")).status).toBe(404);
-		expect((await remove(U1, "pk-ant")).status).toBe(400);
-
-		await call(U1, "DELETE", `/sigw-keys/${id}`);
+	it("プロバイダキーの API(/provider-keys)と、前の足し外しの API はなくなった", async () => {
+		const { call, issue } = await apiSetup();
+		const { id } = await issue();
+		expect((await call(U1, "GET", "/provider-keys")).status).toBe(404);
+		expect(
+			(
+				await call(U1, "POST", "/provider-keys", {
+					provider: "anthropic",
+					apiKey: "sk-ant-xxxxxxxx",
+				})
+			).status,
+		).toBe(404);
 		expect(
 			(
 				await call(U1, "POST", `/sigw-keys/${id}/provider-keys`, {
-					providerKeyId: "pk-or",
+					providerKeyId: "x",
+				})
+			).status,
+		).toBe(404);
+	});
+
+	it("登録していないプロバイダに登録すると、登録した人が所有者になる", async () => {
+		const { db, call, issue, get, decrypt } = await apiSetup();
+		const { id } = await issue();
+		const put = (user: string, provider: string, body: unknown) =>
+			call(user, "PUT", `/sigw-keys/${id}/providers/${provider}`, body);
+
+		// U2 は発行した人でも、API キーを登録した人でもない
+		expect(
+			(await put(U2, "openrouter", { apiKey: "sk-or-u2-key-0001" })).status,
+		).toBe(403);
+		expect(
+			(await put(U1, "gemini", { apiKey: "sk-gem-aaaaaaaa" })).status,
+		).toBe(400);
+		expect((await put(U1, "openrouter", { apiKey: "bad key" })).status).toBe(
+			400,
+		);
+		expect(
+			(
+				await put(U1, "openrouter", {
+					apiKey: "sk-or-u1-key-0002",
+					delegatedOnly: true,
+				})
+			).status,
+		).toBe(200);
+		const key = await get(U1, id);
+		const openrouter = key.providerKeys.find(
+			(item) => item.provider === "openrouter",
+		);
+		expect(openrouter).toMatchObject({
+			keyLast4: "0002",
+			ownerId: U1,
+			delegatedOnly: true,
+		});
+		expect(await decrypt(String(openrouter?.id))).toBe("sk-or-u1-key-0002");
+		expect(
+			db.rows(
+				"SELECT COUNT(*) AS n FROM provider_keys WHERE deleted_at IS NULL",
+			),
+		).toEqual([{ n: 2 }]);
+	});
+
+	it("差し替えると、新しいキーを結び付け、前のキーは外して削除する", async () => {
+		const { db, call, issue, get } = await apiSetup();
+		const { id } = await issue();
+		const before = (await get(U1, id)).providerKeys[0];
+		expect(
+			(
+				await call(U1, "PUT", `/sigw-keys/${id}/providers/anthropic`, {
+					apiKey: "sk-ant-second-BBBB",
+				})
+			).status,
+		).toBe(200);
+		const after = (await get(U1, id)).providerKeys;
+		expect(after).toHaveLength(1);
+		expect(after[0]?.keyLast4).toBe("BBBB");
+		expect(after[0]?.id).not.toBe(before?.id);
+
+		const [old] = db.rows(
+			"SELECT encrypted_key, key_hint, disabled_at, deleted_at FROM provider_keys WHERE id = ?",
+			before?.id,
+		);
+		expect(old).toMatchObject({ encrypted_key: "", key_hint: "…AAAA" });
+		expect(old?.disabled_at).not.toBeNull();
+		expect(old?.deleted_at).not.toBeNull();
+	});
+
+	it("外すと、外したキーを削除する。登録していなければ何もしない。最後の1つも外せる", async () => {
+		const { db, call, issue, get } = await apiSetup();
+		const { id } = await issue();
+		const providerKeyId = (await get(U1, id)).providerKeys[0]?.id;
+		const remove = (user: string, provider: string) =>
+			call(user, "DELETE", `/sigw-keys/${id}/providers/${provider}`);
+
+		expect((await remove(U2, "anthropic")).status).toBe(403);
+		expect((await remove(U1, "openrouter")).status).toBe(200);
+		expect((await remove(U1, "anthropic")).status).toBe(200);
+		const key = await get(U1, id);
+		expect(key.providerKeys).toEqual([]);
+		expect(
+			db.rows(
+				"SELECT encrypted_key, deleted_at IS NOT NULL AS deleted FROM provider_keys WHERE id = ?",
+				providerKeyId,
+			),
+		).toEqual([{ encrypted_key: "", deleted: 1 }]);
+		expect(db.rows("SELECT COUNT(*) AS n FROM sigw_key_providers")).toEqual([
+			{ n: 0 },
+		]);
+		// 外したあとも、sigw キーは発行した人が変えられる
+		expect((await get(U1, id)).editable).toBe(true);
+	});
+
+	it("変えられるのは、発行した人と、API キーを登録した人", async () => {
+		const { call, issue, get, settings } = await apiSetup();
+		const { id } = await issue();
+		const patch = (user: string) =>
+			call(user, "PATCH", `/sigw-keys/${id}`, { ...settings, purpose: "新" });
+		expect((await patch(U2)).status).toBe(403);
+		expect((await get(U2, id)).editable).toBe(false);
+
+		// U1 が、U2 から受け取ったキーを登録しても、所有者は U1。U2 は変えられないまま
+		await call(U1, "PUT", `/sigw-keys/${id}/providers/openai`, {
+			apiKey: "sk-openai-xxxxxxxx",
+		});
+		expect((await patch(U2)).status).toBe(403);
+
+		// U2 は、API キーの登録もできない
+		expect(
+			(
+				await call(U2, "PUT", `/sigw-keys/${id}/providers/xai`, {
+					apiKey: "sk-xai-xxxxxxxx",
+				})
+			).status,
+		).toBe(403);
+	});
+
+	it("API キーを登録した人(発行した人でない)は、ほかのキーも登録・差し替え・外すことができる", async () => {
+		const { db, call, issue, get } = await apiSetup();
+		const { id } = await issue();
+		// 0009 より前のデータのように、U2 のキーが結び付いている
+		await seedProviderKey(db, "pk-u2", U2, "openrouter");
+		db.rows(
+			"INSERT INTO sigw_key_providers VALUES (?, 'openrouter', 'pk-u2', 1)",
+			id,
+		);
+		expect((await get(U2, id)).editable).toBe(true);
+		expect(
+			(
+				await call(U2, "PUT", `/sigw-keys/${id}/providers/anthropic`, {
+					apiKey: "sk-ant-by-u2-CCCC",
+				})
+			).status,
+		).toBe(200);
+		expect(
+			(await call(U2, "DELETE", `/sigw-keys/${id}/providers/openrouter`))
+				.status,
+		).toBe(200);
+		const key = await get(U1, id);
+		expect(
+			key.providerKeys.map((item) => [item.provider, item.ownerId]),
+		).toEqual([["anthropic", U2]]);
+		// U3 は関わっていない
+		expect(
+			(await call(U3, "DELETE", `/sigw-keys/${id}/providers/anthropic`)).status,
+		).toBe(403);
+	});
+
+	it("無効にした sigw キーには、登録も差し替えも外すこともできない", async () => {
+		const { call, issue } = await apiSetup();
+		const { id } = await issue();
+		expect((await call(U1, "DELETE", `/sigw-keys/${id}`)).status).toBe(200);
+		expect(
+			(
+				await call(U1, "PUT", `/sigw-keys/${id}/providers/openai`, {
+					apiKey: "sk-openai-xxxxxxxx",
 				})
 			).status,
 		).toBe(400);
+		expect(
+			(await call(U1, "DELETE", `/sigw-keys/${id}/providers/anthropic`)).status,
+		).toBe(400);
+		expect(
+			(
+				await call(U1, "PUT", "/sigw-keys/nope/providers/openai", {
+					apiKey: "sk-openai-xxxxxxxx",
+				})
+			).status,
+		).toBe(404);
 	});
 
-	it("結び付いたどのキーの所有者も、設定を変えられる", async () => {
-		const { call, settings } = await apiSetup();
-		const { body } = await call(U1, "POST", "/sigw-keys", {
-			...settings,
-			providerKeyIds: ["pk-ant"],
-		});
-		const id = String(body.id);
-		const patch = (user: string) =>
-			call(user, "PATCH", `/sigw-keys/${id}`, { ...settings, purpose: "新" });
-		expect((await patch(U3)).status).toBe(403);
-		await call(U1, "POST", `/sigw-keys/${id}/provider-keys`, {
-			providerKeyId: "pk-or",
-		});
-		expect((await patch(U3)).status).toBe(200);
-	});
-
-	it("足したプロバイダキーは、キャッシュを読み直すと中継で使える", async () => {
-		const { db, call, settings } = await apiSetup();
+	it("差し替えたキーは、キャッシュを読み直すと中継で使われ、前のキーはもう使われない", async () => {
+		const { db, env, call, issue } = await apiSetup();
 		db.rows(
 			"UPDATE users SET personal_token_hash = ? WHERE id = ?",
 			await sha256Hex(PERSONAL_TOKEN),
 			U1,
 		);
-		const created = await call(U1, "POST", "/sigw-keys", {
-			...settings,
-			providerKeyIds: ["pk-ant"],
-		});
-		const env = {
-			DB: db.asD1(),
-			KEY_ENCRYPTION_SECRET: SECRET,
-		} as unknown as Env;
-		const request = () =>
-			new Request("https://sigw/openrouter/api/v1/chat/completions", {
-				method: "POST",
-				headers: {
-					"content-type": "application/json",
-					authorization: `Bearer ${created.body.token}.${PERSONAL_TOKEN}`,
-				},
-				body: JSON.stringify({ model: "m" }),
-			});
-		const first = await handleProxy(
-			request(),
-			env,
-			fakeCtx().ctx,
-			PROVIDERS.openrouter,
-			"/api/v1/chat/completions",
-			"",
-		);
-		expect(first.status).toBe(400);
-		await call(U1, "POST", `/sigw-keys/${created.body.id}/provider-keys`, {
-			providerKeyId: "pk-or",
+		const { id, token } = await issue();
+		const send = async () => {
+			const { ctx, settle } = fakeCtx();
+			const response = await handleProxy(
+				new Request("https://sigw/anthropic/v1/messages", {
+					method: "POST",
+					headers: {
+						"content-type": "application/json",
+						authorization: `Bearer ${token}.${PERSONAL_TOKEN}`,
+					},
+					body: JSON.stringify({ model: "m" }),
+				}),
+				env,
+				ctx,
+				PROVIDERS.anthropic,
+				"/v1/messages",
+				"",
+			);
+			await settle();
+			return response;
+		};
+		expect((await send()).status).toBe(200);
+		await call(U1, "PUT", `/sigw-keys/${id}/providers/anthropic`, {
+			apiKey: "sk-ant-second-BBBB",
 		});
 		clearAuthCache();
-		const second = await handleProxy(
-			request(),
-			env,
-			fakeCtx().ctx,
-			PROVIDERS.openrouter,
-			"/api/v1/chat/completions",
-			"",
-		);
-		expect(second.status).toBe(200);
+		expect((await send()).status).toBe(200);
+		expect(upstreamCalls.map((item) => item.headers.get("x-api-key"))).toEqual([
+			"sk-ant-first-AAAA",
+			"sk-ant-second-BBBB",
+		]);
+
+		await call(U1, "DELETE", `/sigw-keys/${id}/providers/anthropic`);
+		clearAuthCache();
+		expect((await send()).status).toBe(400);
+		expect(upstreamCalls).toHaveLength(2);
+		// 使用量は、それぞれのキーの所有者で記録している
+		expect(
+			db.rows("SELECT owner_id FROM usage_events").map((row) => row.owner_id),
+		).toEqual([U1, U1]);
 	});
 });
 

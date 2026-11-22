@@ -327,9 +327,11 @@ export async function recordCreatedSession(
  * DELETE /v1/sessions/{id} を中継する前に、最後の分を読んで記録する。
  * 記録していないセッションなら何もしない。削除を遅らせすぎないよう、待つのは DELETE_WAIT_MS まで
  * (それを過ぎたら削除を中継し、読み終わるのは ctx.waitUntil に任せる)。
+ * セッションを作ったときと、いま sigw キーに登録している API キーが違う(差し替えた)ときは、
+ * セッションを作ったときのキーで読む(docs/design.md 5.3)
  */
 export async function finalizeBeforeDelete(
-	target: PollTarget,
+	target: PollTarget & { providerKeyId: string },
 	ctx: ExecutionContext,
 	sessionId: string,
 	now = Date.now(),
@@ -339,8 +341,17 @@ export async function finalizeBeforeDelete(
 		if (!session || session.endedAt !== null) {
 			return;
 		}
+		const apiKey =
+			session.providerKeyId === target.providerKeyId
+				? target.apiKey
+				: (await loadApiKeys(target.env, [session.providerKeyId])).get(
+						session.providerKeyId,
+					);
+		if (!apiKey) {
+			return;
+		}
 		await pollSession(
-			target,
+			{ ...target, apiKey },
 			session,
 			"DELETE",
 			now,
@@ -363,13 +374,24 @@ export async function finalizeBeforeDelete(
 	clearTimeout(timer);
 }
 
-/** DELETE /v1/sessions/{id} を中継したあと。削除できた(か、もうなかった)なら、読むのをやめる */
+/**
+ * DELETE /v1/sessions/{id} を中継したあと。削除できた(か、もうなかった)なら、読むのをやめる。
+ * セッションを作ったときと違う API キーで 404 になったときは、別のワークスペースのキーで呼んだだけかもしれないので、
+ * 読むのをやめない(なくなっていれば、Cron が作ったときのキーで読んで 404 になり、そこでやめる)
+ */
 export async function afterSessionDelete(
 	env: Env,
 	sessionId: string,
 	status: number,
+	providerKeyId: string,
 	now = Date.now(),
 ): Promise<void> {
+	if (status === 404) {
+		const session = await getAgentSession(env.DB, sessionId);
+		if (session && session.providerKeyId !== providerKeyId) {
+			return;
+		}
+	}
 	if ((status >= 200 && status < 300) || status === 404) {
 		await endAgentSession(env.DB, sessionId, "deleted", now);
 	}
@@ -431,7 +453,8 @@ export async function pollAgentSessions(
 
 /**
  * プロバイダキーを復号して返す。無効にしたキーも使う(セッションの料金は、無効にしたあとも発生するため)。
- * 削除したキーは、暗号化したキーが消えているので読まない(セッションが動いているあいだは削除できない)
+ * 削除したキーも、暗号化したキーが残っていれば使う。セッションが動いているあいだに削除したキーは、
+ * セッションが終わるまで暗号化したキーを残すため(docs/design.md 3.3)。消えたキーは読まない
  */
 async function loadApiKeys(
 	env: Env,
@@ -439,7 +462,7 @@ async function loadApiKeys(
 ): Promise<Map<string, string>> {
 	const keys = new Map<string, string>();
 	const { results } = await env.DB.prepare(
-		`SELECT id, encrypted_key FROM provider_keys WHERE id IN (${ids.map(() => "?").join(", ")}) AND deleted_at IS NULL`,
+		`SELECT id, encrypted_key FROM provider_keys WHERE id IN (${ids.map(() => "?").join(", ")}) AND encrypted_key <> ''`,
 	)
 		.bind(...ids)
 		.all<{ id: string; encrypted_key: string }>();

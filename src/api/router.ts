@@ -10,18 +10,16 @@ import {
 	startCliLogin,
 } from "../db/cli-logins.ts";
 import {
-	addSigwKeyProvider,
-	createProviderKey,
+	canEditSigwKey,
 	createSigwKey,
-	deleteProviderKey,
 	deleteSigwKey,
 	getSigwKey,
-	listProviderKeys,
 	listSigwKeys,
+	type NewApiKey,
 	removeSigwKeyProvider,
 	revokeSigwKey,
 	type SigwKeySettings,
-	setProviderKeyEnabled,
+	setSigwKeyProvider,
 	updateSigwKey,
 } from "../db/keys.ts";
 import {
@@ -59,6 +57,7 @@ import type {
 	MeJson,
 	PriceInput,
 	SettlementPreviewJson,
+	SigwKeyApiKeyInput,
 	SigwKeyInput,
 	SigwKeyJson,
 	UsageOverviewJson,
@@ -346,44 +345,11 @@ route("DELETE", "/cli-tokens/:id", async ({ env, user, params }) => {
 	await deleteCliToken(env.DB, user.id, params.id ?? "");
 });
 
-// ---- プロバイダキー ----
-
-route("GET", "/provider-keys", ({ env }) => listProviderKeys(env.DB));
-
-route("POST", "/provider-keys", async ({ env, user, request }) => {
-	const input = await body<{
-		provider?: string;
-		label?: string;
-		apiKey?: string;
-		delegatedOnly?: boolean;
-	}>(request);
-	const id = await createProviderKey(env.DB, env.KEY_ENCRYPTION_SECRET, {
-		ownerId: user.id,
-		provider: String(input.provider ?? ""),
-		label: String(input.label ?? ""),
-		apiKey: String(input.apiKey ?? ""),
-		delegatedOnly: input.delegatedOnly === true,
-	});
-	return { id };
-});
-
-route("POST", "/provider-keys/:id/disable", async ({ env, user, params }) => {
-	await setProviderKeyEnabled(env.DB, params.id ?? "", user.id, false);
-});
-
-route("POST", "/provider-keys/:id/enable", async ({ env, user, params }) => {
-	await setProviderKeyEnabled(env.DB, params.id ?? "", user.id, true);
-});
-
-// 削除。暗号化したキーを消し、結び付いたすべての sigw キーから外す。名前は使用量のために残す
-route("POST", "/provider-keys/:id/delete", async ({ env, user, params }) => {
-	await deleteProviderKey(env.DB, params.id ?? "", user.id);
-});
-
 // ---- sigw キー ----
 
 async function sigwKeysWithSpend(
 	env: Env,
+	user: User,
 	month: string,
 	includeDeleted = false,
 ): Promise<SigwKeyJson[]> {
@@ -394,15 +360,25 @@ async function sigwKeysWithSpend(
 	const byKey = new Map(spend.map((row) => [row.sigwKeyId, row]));
 	return keys.map((key) => ({
 		...key,
+		editable: key.deletedAt === null && canEditSigwKey(key, user.id),
 		monthSpendNano: byKey.get(key.id)?.costNano ?? 0,
 		monthRequests: byKey.get(key.id)?.requests ?? 0,
 	}));
 }
 
+function apiKeyInput(input: SigwKeyApiKeyInput, provider?: string): NewApiKey {
+	return {
+		provider: String(provider ?? input.provider ?? ""),
+		apiKey: String(input.apiKey ?? ""),
+		delegatedOnly: input.delegatedOnly === true,
+	};
+}
+
 // includeDeleted=1 なら、削除したキーも返す(deletedAt が入る)。使用量の画面で名前を出すため
-route("GET", "/sigw-keys", ({ env, url }) =>
+route("GET", "/sigw-keys", ({ env, user, url }) =>
 	sigwKeysWithSpend(
 		env,
+		user,
 		monthOf(Date.now()),
 		url.searchParams.get("includeDeleted") === "1",
 	),
@@ -410,21 +386,24 @@ route("GET", "/sigw-keys", ({ env, url }) =>
 
 route("POST", "/sigw-keys", async ({ env, user, request }) => {
 	const input = await body<SigwKeyInput>(request);
-	const providerKeyIds = Array.isArray(input.providerKeyIds)
-		? input.providerKeyIds.map(String)
-		: input.providerKeyId
-			? [String(input.providerKeyId)]
-			: [];
-	return createSigwKey(env.DB, {
+	// 前の CLI(プロバイダキーを選んで発行する形)。API キーのない sigw キーを黙って作らないよう断る
+	if ("providerKeyIds" in input || "providerKeyId" in input) {
+		throw badRequest(
+			"この版の CLI は使えなくなりました。sigw update で最新の版にしてください",
+		);
+	}
+	return createSigwKey(env.DB, env.KEY_ENCRYPTION_SECRET, {
 		...sigwKeySettings(input),
-		providerKeyIds,
+		apiKeys: Array.isArray(input.apiKeys)
+			? input.apiKeys.map((item) => apiKeyInput(item ?? {}))
+			: [],
 		createdBy: user.id,
 	});
 });
 
-route("GET", "/sigw-keys/:id", async ({ env, params }) => {
+route("GET", "/sigw-keys/:id", async ({ env, user, params }) => {
 	const month = monthOf(Date.now());
-	const key = (await sigwKeysWithSpend(env, month)).find(
+	const key = (await sigwKeysWithSpend(env, user, month)).find(
 		(item) => item.id === params.id,
 	);
 	if (!key) {
@@ -438,33 +417,32 @@ route("PATCH", "/sigw-keys/:id", async ({ env, user, params, request }) => {
 	await updateSigwKey(env.DB, params.id ?? "", user.id, sigwKeySettings(input));
 });
 
-// 発行したあとで、プロバイダキーを足す・外す(プロバイダごとに1つまで)
+// そのプロバイダの API キーを登録する。登録済みなら差し替え、前のキーは削除する
 route(
-	"POST",
-	"/sigw-keys/:id/provider-keys",
+	"PUT",
+	"/sigw-keys/:id/providers/:provider",
 	async ({ env, user, params, request }) => {
-		const input = await body<{ providerKeyId?: string }>(request);
-		if (!input.providerKeyId) {
-			throw badRequest("プロバイダキーを選んでください");
-		}
-		await addSigwKeyProvider(
+		const input = await body<SigwKeyApiKeyInput>(request);
+		await setSigwKeyProvider(
 			env.DB,
+			env.KEY_ENCRYPTION_SECRET,
 			params.id ?? "",
 			user.id,
-			String(input.providerKeyId),
+			apiKeyInput(input ?? {}, params.provider ?? ""),
 		);
 	},
 );
 
+// そのプロバイダの API キーを外して削除する
 route(
 	"DELETE",
-	"/sigw-keys/:id/provider-keys/:providerKeyId",
+	"/sigw-keys/:id/providers/:provider",
 	async ({ env, user, params }) => {
 		await removeSigwKeyProvider(
 			env.DB,
 			params.id ?? "",
 			user.id,
-			params.providerKeyId ?? "",
+			params.provider ?? "",
 		);
 	},
 );
@@ -477,7 +455,7 @@ route("DELETE", "/sigw-keys/:id", async ({ env, user, params }) => {
 	await revokeSigwKey(env.DB, params.id ?? "", user.id);
 });
 
-// 削除。トークンを使えなくし、一覧から消す。目的は使用量のために残す
+// 削除。トークンを使えなくし、一覧から消す。登録した API キーも削除する。目的は使用量のために残す
 route("POST", "/sigw-keys/:id/delete", async ({ env, user, params }) => {
 	await deleteSigwKey(env.DB, params.id ?? "", user.id);
 });
