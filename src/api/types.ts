@@ -76,6 +76,8 @@ export interface SigwKeyJson {
 	expiresAt: number | null;
 	createdAt: number;
 	revokedAt: number | null;
+	/** 削除した時刻。削除したキーは、GET /sigw-keys?includeDeleted=1 でだけ返す */
+	deletedAt: number | null;
 	/** 今月の使用額(全プロバイダの合計) */
 	monthSpendNano: number;
 	monthRequests: number;

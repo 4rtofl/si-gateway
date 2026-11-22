@@ -4,6 +4,8 @@
  * - 代理専用のプロバイダキーは、登録するときに決める。あとから公開の入口で使えるようにはしない
  * - sigw キーは誰でも発行できる。プロバイダごとに1つずつ、プロバイダキーを結び付ける(sigw_key_providers)
  * - sigw キーの変更と無効化は、発行した人と、結び付いたプロバイダキーの所有者ができる
+ * - 削除は、無効化と同じ人ができる。秘密の値(暗号化したキー、トークンのハッシュ)だけを消し、行は残す。
+ *   過去の使用量に名前を出すため。削除したキーは、一覧にも出さない(docs/design.md 3.3)
  */
 
 import {
@@ -14,7 +16,7 @@ import {
 	TOKEN_PREFIX,
 	tokenHint,
 } from "../lib/crypto.ts";
-import { badRequest, forbidden, notFound } from "../lib/errors.ts";
+import { badRequest, conflict, forbidden, notFound } from "../lib/errors.ts";
 import {
 	isProviderId,
 	PROVIDER_IDS,
@@ -44,6 +46,7 @@ export async function listProviderKeys(db: D1Database): Promise<ProviderKey[]> {
 				(SELECT COUNT(*) FROM sigw_key_providers l JOIN sigw_keys s ON s.id = l.sigw_key_id
 					WHERE l.provider_key_id = p.id AND s.revoked_at IS NULL) AS active_sigw_keys
 			 FROM provider_keys p JOIN users u ON u.id = p.owner_id
+			 WHERE p.deleted_at IS NULL
 			 ORDER BY p.disabled_at IS NOT NULL, p.created_at`,
 		)
 		.all<{
@@ -116,15 +119,16 @@ export async function createProviderKey(
 	return id;
 }
 
-/** プロバイダキーを無効にする(enabled = false)か、有効に戻す。所有者だけができる */
-export async function setProviderKeyEnabled(
+/** 削除していないプロバイダキーの所有者かを確かめる */
+async function requireProviderKeyOwner(
 	db: D1Database,
 	id: string,
 	actorId: string,
-	enabled: boolean,
 ): Promise<void> {
 	const row = await db
-		.prepare("SELECT owner_id FROM provider_keys WHERE id = ?")
+		.prepare(
+			"SELECT owner_id FROM provider_keys WHERE id = ? AND deleted_at IS NULL",
+		)
 		.bind(id)
 		.first<{ owner_id: string }>();
 	if (!row) {
@@ -133,10 +137,64 @@ export async function setProviderKeyEnabled(
 	if (row.owner_id !== actorId) {
 		throw forbidden("プロバイダキーを変えられるのは、登録した人だけです");
 	}
+}
+
+/** プロバイダキーを無効にする(enabled = false)か、有効に戻す。所有者だけができる */
+export async function setProviderKeyEnabled(
+	db: D1Database,
+	id: string,
+	actorId: string,
+	enabled: boolean,
+): Promise<void> {
+	await requireProviderKeyOwner(db, id, actorId);
 	await db
 		.prepare("UPDATE provider_keys SET disabled_at = ? WHERE id = ?")
 		.bind(enabled ? null : Date.now(), id)
 		.run();
+}
+
+/**
+ * プロバイダキーを削除する。所有者だけができる。
+ * 暗号化したキーを消し(空の文字列にする)、無効にして、結び付いたすべての sigw キーから外す。
+ * 名前と末尾4文字は残す。
+ * Managed Agents のセッションが動いている(読むのをやめていない)あいだは断る。
+ * Cron がこのキーでセッションの使用量を読むため(docs/design.md 5.3)
+ */
+export async function deleteProviderKey(
+	db: D1Database,
+	id: string,
+	actorId: string,
+): Promise<void> {
+	await requireProviderKeyOwner(db, id, actorId);
+	const now = Date.now();
+	// セッションの確かめと削除を、同じトランザクションで行う。確かめたあとにセッションが増えても、消さないため
+	const [deleted] = await db.batch([
+		db
+			.prepare(
+				`UPDATE provider_keys SET encrypted_key = '', deleted_at = ?, disabled_at = COALESCE(disabled_at, ?)
+				 WHERE id = ? AND deleted_at IS NULL
+					AND NOT EXISTS (SELECT 1 FROM agent_sessions WHERE provider_key_id = ? AND ended_at IS NULL)`,
+			)
+			.bind(now, now, id, id),
+		db
+			.prepare(
+				`UPDATE sigw_keys SET updated_at = ?
+				 WHERE id IN (SELECT sigw_key_id FROM sigw_key_providers WHERE provider_key_id = ?)
+					AND EXISTS (SELECT 1 FROM provider_keys WHERE id = ? AND deleted_at = ?)`,
+			)
+			.bind(now, id, id, now),
+		db
+			.prepare(
+				`DELETE FROM sigw_key_providers WHERE provider_key_id = ?
+					AND EXISTS (SELECT 1 FROM provider_keys WHERE id = ? AND deleted_at = ?)`,
+			)
+			.bind(id, id, now),
+	]);
+	if ((deleted?.meta.changes ?? 0) === 0) {
+		throw conflict(
+			"このプロバイダキーで動いているエージェントのセッションがあります。セッションが終わってから削除してください。",
+		);
+	}
 }
 
 /** sigw キーに結び付いたプロバイダキー。sigw キー1つに、プロバイダごとに1つまで */
@@ -167,6 +225,8 @@ export interface SigwKey {
 	expiresAt: number | null;
 	createdAt: number;
 	revokedAt: number | null;
+	/** 削除した時刻。削除したキーは、使用量に名前を出すときにだけ返す(listSigwKeys の includeDeleted) */
+	deletedAt: number | null;
 }
 
 interface SigwKeyRow {
@@ -180,6 +240,7 @@ interface SigwKeyRow {
 	expires_at: number | null;
 	created_at: number;
 	revoked_at: number | null;
+	deleted_at: number | null;
 }
 
 interface LinkRow {
@@ -195,7 +256,7 @@ interface LinkRow {
 }
 
 const SIGW_KEY_SELECT = `SELECT s.id, s.created_by, c.name AS created_by_name, s.purpose, s.token_hint, s.allowed_models,
-	s.monthly_limit_nano_usd, s.expires_at, s.created_at, s.revoked_at
+	s.monthly_limit_nano_usd, s.expires_at, s.created_at, s.revoked_at, s.deleted_at
 	FROM sigw_keys s
 	JOIN users c ON c.id = s.created_by`;
 
@@ -240,6 +301,7 @@ function toSigwKeys(rows: SigwKeyRow[], links: LinkRow[]): SigwKey[] {
 		expiresAt: row.expires_at,
 		createdAt: row.created_at,
 		revokedAt: row.revoked_at,
+		deletedAt: row.deleted_at,
 	}));
 }
 
@@ -257,10 +319,15 @@ export function parseModels(json: string | null): string[] | null {
 	}
 }
 
-export async function listSigwKeys(db: D1Database): Promise<SigwKey[]> {
+/** sigw キーの一覧。includeDeleted なら、削除したキーも返す(使用量に名前を出すため) */
+export async function listSigwKeys(
+	db: D1Database,
+	options: { includeDeleted?: boolean } = {},
+): Promise<SigwKey[]> {
 	const [keys, links] = await db.batch([
 		db.prepare(
-			`${SIGW_KEY_SELECT} ORDER BY s.revoked_at IS NOT NULL, s.created_at DESC`,
+			`${SIGW_KEY_SELECT} ${options.includeDeleted ? "" : "WHERE s.deleted_at IS NULL"}
+			 ORDER BY s.deleted_at IS NOT NULL, s.revoked_at IS NOT NULL, s.created_at DESC`,
 		),
 		db.prepare(LINK_SELECT),
 	]);
@@ -270,12 +337,15 @@ export async function listSigwKeys(db: D1Database): Promise<SigwKey[]> {
 	);
 }
 
+/** 削除していない sigw キーを引く */
 export async function getSigwKey(
 	db: D1Database,
 	id: string,
 ): Promise<SigwKey | null> {
 	const [keys, links] = await db.batch([
-		db.prepare(`${SIGW_KEY_SELECT} WHERE s.id = ?`).bind(id),
+		db
+			.prepare(`${SIGW_KEY_SELECT} WHERE s.id = ? AND s.deleted_at IS NULL`)
+			.bind(id),
 		db.prepare(`${LINK_SELECT} WHERE l.sigw_key_id = ?`).bind(id),
 	]);
 	return (
@@ -327,7 +397,7 @@ async function providerKeyState(
 ): Promise<ProviderKeyState> {
 	const row = await db
 		.prepare(
-			"SELECT id, provider, owner_id, disabled_at FROM provider_keys WHERE id = ?",
+			"SELECT id, provider, owner_id, disabled_at FROM provider_keys WHERE id = ? AND deleted_at IS NULL",
 		)
 		.bind(id)
 		.first<ProviderKeyState>();
@@ -557,5 +627,25 @@ export async function revokeSigwKey(
 	await db
 		.prepare("UPDATE sigw_keys SET revoked_at = ?, updated_at = ? WHERE id = ?")
 		.bind(Date.now(), Date.now(), id)
+		.run();
+}
+
+/**
+ * sigw キーを削除する。無効化と同じく、発行した人と、結び付いたプロバイダキーの所有者ができる。
+ * トークンのハッシュを、どのトークンとも一致しない値(deleted: と ID)にして、無効にする。目的などは残す
+ */
+export async function deleteSigwKey(
+	db: D1Database,
+	id: string,
+	actorId: string,
+): Promise<void> {
+	await requireEditable(db, id, actorId);
+	const now = Date.now();
+	await db
+		.prepare(
+			`UPDATE sigw_keys SET token_hash = 'deleted:' || id, deleted_at = ?, revoked_at = COALESCE(revoked_at, ?), updated_at = ?
+			 WHERE id = ? AND deleted_at IS NULL`,
+		)
+		.bind(now, now, now, id)
 		.run();
 }

@@ -118,16 +118,37 @@ export function KeyDetailPage() {
 		}
 	};
 
+	// 削除は、無効にしたキーでもできる
+	const remove = async () => {
+		if (
+			!window.confirm(`「${data.purpose}」を削除しますか？元には戻せません。`)
+		)
+			return;
+		try {
+			await api(`/sigw-keys/${data.id}/delete`, { method: "POST" });
+			toast("削除しました");
+			navigate("/keys");
+		} catch (error) {
+			toast(error instanceof Error ? error.message : String(error), "error");
+		}
+	};
+
 	return (
 		<>
 			<PageHeader
 				title={data.purpose}
 				actions={
-					editable &&
-					active && (
-						<Button variant="destructive" size="sm" onClick={revoke}>
-							無効にする
-						</Button>
+					editable && (
+						<div className="flex items-center gap-2">
+							{active && (
+								<Button variant="destructive" size="sm" onClick={revoke}>
+									無効にする
+								</Button>
+							)}
+							<Button variant="destructive" size="sm" onClick={remove}>
+								削除
+							</Button>
+						</div>
 					)
 				}
 			/>

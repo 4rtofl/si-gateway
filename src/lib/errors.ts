@@ -20,3 +20,7 @@ export function forbidden(message: string): AppError {
 export function notFound(message: string): AppError {
 	return new AppError(404, message);
 }
+
+export function conflict(message: string): AppError {
+	return new AppError(409, message);
+}

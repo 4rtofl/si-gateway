@@ -75,6 +75,7 @@ const HELP = `sigw の CLI ${VERSION}
                                       プロバイダキーを登録する(キーは標準入力から読む)。
                                       --delegated-only: 代理専用(Bobert からの呼び出しでだけ使える)
   provider-keys disable|enable <ID>   プロバイダキーを無効にする・有効に戻す
+  provider-keys delete <ID> [--yes]   プロバイダキーを削除する(結び付いた sigw キーから外れる。元には戻せない)
 
   keys                                sigw キーの一覧
   keys show <ID>                      sigw キーの詳細と今月の呼び出し
@@ -86,6 +87,7 @@ const HELP = `sigw の CLI ${VERSION}
   keys remove-provider <ID> <プロバイダキーの ID>
                                       sigw キーからプロバイダキーを外す
   keys revoke <ID>                    sigw キーを無効にする
+  keys delete <ID> [--yes]            sigw キーを削除する(元には戻せない)
 
   usage [--month YYYY-MM] [--by user|pair|key|model]
   events [--month YYYY-MM] [--user ID] [--key ID] [--limit N]
@@ -511,6 +513,15 @@ function printEvents(
 	);
 }
 
+/** 削除する前に、ターミナルで確かめる。--yes なら聞かない。y か yes(大文字も可)だけで進む */
+async function confirmDelete(options: Options): Promise<boolean> {
+	if (options.yes === true) {
+		return true;
+	}
+	const answer = await prompt("削除しますか？元には戻せません。[y/N] ");
+	return /^(y|yes)$/i.test(answer);
+}
+
 function printPreview(preview: SettlementPreviewJson | SettlementJson): void {
 	console.log(
 		`${preview.month}  1 USD = ${preview.usdJpy.toFixed(2)}円(${preview.fxSource})`,
@@ -556,6 +567,7 @@ async function main(): Promise<void> {
 			"with-token": { type: "boolean" },
 			"delegated-only": { type: "boolean" },
 			"no-browser": { type: "boolean" },
+			yes: { type: "boolean" },
 			help: { type: "boolean", short: "h" },
 			version: { type: "boolean", short: "v" },
 		},
@@ -683,6 +695,15 @@ async function main(): Promise<void> {
 				console.log(sub === "disable" ? "無効にしました" : "有効に戻しました");
 				return;
 			}
+			if (sub === "delete" && arg1) {
+				if (!(await confirmDelete(values))) {
+					process.exitCode = 1;
+					return;
+				}
+				await call("POST", `/provider-keys/${arg1}/delete`);
+				console.log("削除しました");
+				return;
+			}
 			break;
 		}
 		case "keys": {
@@ -745,6 +766,15 @@ async function main(): Promise<void> {
 				console.log("無効にしました");
 				return;
 			}
+			if (sub === "delete" && arg1) {
+				if (!(await confirmDelete(values))) {
+					process.exitCode = 1;
+					return;
+				}
+				await call("POST", `/sigw-keys/${arg1}/delete`);
+				console.log("削除しました");
+				return;
+			}
 			break;
 		}
 		case "usage": {
@@ -786,11 +816,11 @@ async function main(): Promise<void> {
 					rows(overview.byUser, (r) => name(r.userId)),
 				);
 			else if (by === "key") {
+				// 削除した sigw キーも、名前を出す
 				const keys = new Map(
-					(await call<SigwKeyJson[]>("GET", "/sigw-keys")).map((k) => [
-						k.id,
-						k.purpose,
-					]),
+					(await call<SigwKeyJson[]>("GET", "/sigw-keys?includeDeleted=1")).map(
+						(k) => [k.id, k.deletedAt ? `${k.purpose}(削除済み)` : k.purpose],
+					),
 				);
 				table(
 					["sigw キー", ...headers.slice(1)],

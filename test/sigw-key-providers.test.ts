@@ -93,7 +93,8 @@ describe("マイグレーション 0007", () => {
 		const usageBefore = db.rows("SELECT * FROM usage_events");
 		const sessionsBefore = db.rows("SELECT * FROM agent_sessions");
 
-		db.migrate();
+		// 0008 からは列が増えるので、0007 までを流して比べる
+		db.migrate({ before: "0008" });
 
 		expect(db.rows("SELECT * FROM sigw_keys ORDER BY id")).toEqual(before);
 		expect(

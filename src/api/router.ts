@@ -13,6 +13,8 @@ import {
 	addSigwKeyProvider,
 	createProviderKey,
 	createSigwKey,
+	deleteProviderKey,
+	deleteSigwKey,
 	getSigwKey,
 	listProviderKeys,
 	listSigwKeys,
@@ -373,14 +375,20 @@ route("POST", "/provider-keys/:id/enable", async ({ env, user, params }) => {
 	await setProviderKeyEnabled(env.DB, params.id ?? "", user.id, true);
 });
 
+// 削除。暗号化したキーを消し、結び付いたすべての sigw キーから外す。名前は使用量のために残す
+route("POST", "/provider-keys/:id/delete", async ({ env, user, params }) => {
+	await deleteProviderKey(env.DB, params.id ?? "", user.id);
+});
+
 // ---- sigw キー ----
 
 async function sigwKeysWithSpend(
 	env: Env,
 	month: string,
+	includeDeleted = false,
 ): Promise<SigwKeyJson[]> {
 	const [keys, spend] = await Promise.all([
-		listSigwKeys(env.DB),
+		listSigwKeys(env.DB, { includeDeleted }),
 		summarizeUsage(env.DB, month, "key"),
 	]);
 	const byKey = new Map(spend.map((row) => [row.sigwKeyId, row]));
@@ -391,8 +399,13 @@ async function sigwKeysWithSpend(
 	}));
 }
 
-route("GET", "/sigw-keys", ({ env }) =>
-	sigwKeysWithSpend(env, monthOf(Date.now())),
+// includeDeleted=1 なら、削除したキーも返す(deletedAt が入る)。使用量の画面で名前を出すため
+route("GET", "/sigw-keys", ({ env, url }) =>
+	sigwKeysWithSpend(
+		env,
+		monthOf(Date.now()),
+		url.searchParams.get("includeDeleted") === "1",
+	),
 );
 
 route("POST", "/sigw-keys", async ({ env, user, request }) => {
@@ -456,11 +469,17 @@ route(
 	},
 );
 
+// 無効にする。前の CLI(sigw keys revoke)が呼ぶので、削除には使わない
 route("DELETE", "/sigw-keys/:id", async ({ env, user, params }) => {
 	if (!(await getSigwKey(env.DB, params.id ?? ""))) {
 		throw notFound("sigw キーが見つかりません");
 	}
 	await revokeSigwKey(env.DB, params.id ?? "", user.id);
+});
+
+// 削除。トークンを使えなくし、一覧から消す。目的は使用量のために残す
+route("POST", "/sigw-keys/:id/delete", async ({ env, user, params }) => {
+	await deleteSigwKey(env.DB, params.id ?? "", user.id);
 });
 
 // ---- 使用量 ----

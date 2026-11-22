@@ -7,7 +7,8 @@
  * - 読んでから30秒までは、そのまま使う
  * - 30秒を過ぎたら、手元の値で応答しつつ、裏で読み直す(ctx.waitUntil)
  * - 10分を過ぎた値は使わず、読み直すのを待つ
- * そのため、sigw キーの無効化や、プロバイダキーを足す・外すなどの変更は、遅くとも「30秒後の次の呼び出しの、さらに次」から効く。
+ * そのため、sigw キーの無効化や削除、プロバイダキーを足す・外すなどの変更は、遅くとも「30秒後の次の呼び出しの、さらに次」から効く。
+ * 削除したキーは D1 から読まない(削除したプロバイダキーは、暗号化したキーも消えている)。
  */
 
 import { parseModels } from "../db/keys.ts";
@@ -155,11 +156,11 @@ interface LinkRow {
 }
 
 const KEY_SQL =
-	"SELECT id, purpose, allowed_models, monthly_limit_nano_usd, expires_at, revoked_at FROM sigw_keys WHERE token_hash = ?";
+	"SELECT id, purpose, allowed_models, monthly_limit_nano_usd, expires_at, revoked_at FROM sigw_keys WHERE token_hash = ? AND deleted_at IS NULL";
 
 const LINKS_SQL = `SELECT l.provider, l.provider_key_id, p.owner_id, p.encrypted_key, p.disabled_at, p.delegated_only
 	FROM sigw_key_providers l JOIN provider_keys p ON p.id = l.provider_key_id
-	WHERE l.sigw_key_id = (SELECT id FROM sigw_keys WHERE token_hash = ?)`;
+	WHERE l.sigw_key_id = (SELECT id FROM sigw_keys WHERE token_hash = ?) AND p.deleted_at IS NULL`;
 
 /** 利用者の引き方。個人トークンのハッシュか、Discord ID か */
 type UserLookup = { hash: string } | { id: string };
@@ -331,7 +332,7 @@ export function addSpend(
 /**
  * BobertGateway の GET /sigw/key。sigw キーで呼べるプロバイダの一覧を返す(docs/design.md 4.5)。
  * Bobert が登録するキーを確かめるのに使うので、キャッシュを使わずに D1 から読む。プロバイダキーは復号しない。
- * - invalid_key: sigw キーがない、無効にした、または有効期限が切れた
+ * - invalid_key: sigw キーがない、無効にした、削除した、または有効期限が切れた
  * - not_member: discordId が users にいない(discordId を渡したときだけ)
  * 呼べるプロバイダは、結び付いたプロバイダキーが無効になっていないもの。並びは PROVIDER_IDS の順
  */
