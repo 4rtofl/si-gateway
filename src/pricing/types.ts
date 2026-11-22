@@ -12,6 +12,8 @@ export interface Price {
 	outputAbove200k?: number;
 	cacheReadAbove200k?: number;
 	cacheWriteAbove200k?: number;
+	/** サーバー側の Web 検索1回の単価(USD / 回)。なければ DEFAULT_WEB_SEARCH_PRICE */
+	webSearch?: number;
 	/** service_tier(flex、priority など)ごとの単価。書かれた項目だけ置き換える */
 	tiers?: Record<string, Partial<Price>>;
 }

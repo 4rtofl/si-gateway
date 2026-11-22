@@ -545,7 +545,9 @@ async function record(
 	if (report.providerCostNano !== null) {
 		costNano = report.providerCostNano;
 		costSource = "provider";
-	} else if (tokens > 0) {
+	} else if (tokens > 0 || usage.webSearchRequests > 0) {
+		// Web 検索の料金はトークンの料金に足す。モデルの単価がなければ、どちらも数えずに料金を空にする
+		// (検索の回数は記録するので、単価を足したあとの計算し直しで、検索の料金も入る)
 		const prices = model
 			? await loadProviderPrices(meta.env.DB, meta.provider.id)
 			: null;

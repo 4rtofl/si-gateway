@@ -50,6 +50,15 @@ describe("computeCostNano", () => {
 		expect(computeCostNano(usage, price, "flex")).toBe(1_500_000);
 		expect(computeCostNano(usage, price, "default")).toBe(3_000_000);
 	});
+
+	it("Web 検索は、単価表の単価がなければ1回 $0.01 で足す", () => {
+		const usage = { ...emptyUsage(), inputTokens: 1000, webSearchRequests: 3 };
+		// 1000*3 マイクロドル + 3*0.01 ドル
+		expect(computeCostNano(usage, sonnet)).toBe(3_000_000 + 30_000_000);
+		expect(computeCostNano(usage, { ...sonnet, webSearch: 0.02 })).toBe(
+			3_000_000 + 60_000_000,
+		);
+	});
 });
 
 describe("単価の検索", () => {
@@ -86,6 +95,11 @@ describe("LiteLLM の価格表", () => {
 				output_cost_per_token: 15e-6,
 				cache_creation_input_token_cost: 3.75e-6,
 				cache_creation_input_token_cost_above_1hr: 6e-6,
+				search_context_cost_per_query: {
+					search_context_size_low: 0.01,
+					search_context_size_medium: 0.01,
+					search_context_size_high: 0.01,
+				},
 			},
 			"xai/grok-4": {
 				litellm_provider: "xai",
@@ -125,6 +139,12 @@ describe("LiteLLM の価格表", () => {
 		expect(
 			rows.find((row) => row.model === "claude-sonnet-4-5")?.price.cacheWrite1h,
 		).toBe(6e-6);
+		expect(
+			rows.find((row) => row.model === "claude-sonnet-4-5")?.price.webSearch,
+		).toBe(0.01);
+		expect(rows.find((row) => row.model === "grok-4")?.price.webSearch).toBe(
+			undefined,
+		);
 		expect(rows.find((row) => row.model === "gpt-5")?.price.tiers).toEqual({
 			flex: { input: 0.625e-6 },
 		});

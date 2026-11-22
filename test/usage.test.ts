@@ -47,6 +47,7 @@ describe("OpenAI の使用量", () => {
 			cacheWriteTokens: 0,
 			cacheWrite1hTokens: 0,
 			outputTokens: 30,
+			webSearchRequests: 0,
 		});
 		expect(report.complete).toBe(true);
 	});
@@ -158,6 +159,7 @@ describe("Anthropic の使用量", () => {
 			cacheWriteTokens: 1000,
 			cacheWrite1hTokens: 2000,
 			outputTokens: 420,
+			webSearchRequests: 0,
 		});
 		expect(report.complete).toBe(true);
 	});
@@ -174,6 +176,58 @@ describe("Anthropic の使用量", () => {
 		expect(report.usage.inputTokens).toBe(50);
 		expect(report.usage.outputTokens).toBe(10);
 		expect(report.complete).toBe(true);
+	});
+
+	it("Web 検索の回数を、message_delta の累計で読む", async () => {
+		const body = sse([
+			{
+				type: "message_start",
+				message: {
+					model: "claude-sonnet-4-5",
+					usage: {
+						input_tokens: 100,
+						output_tokens: 1,
+						server_tool_use: { web_search_requests: 0 },
+					},
+				},
+			},
+			{
+				type: "message_delta",
+				usage: {
+					output_tokens: 50,
+					server_tool_use: { web_search_requests: 1 },
+				},
+			},
+			{
+				type: "message_delta",
+				usage: {
+					output_tokens: 300,
+					server_tool_use: { web_search_requests: 3 },
+				},
+			},
+			// server_tool_use が書かれていなければ、前の値を残す
+			{ type: "message_delta", usage: { output_tokens: 320 } },
+			{ type: "message_stop" },
+		]);
+		const report = await collectFromSse(streamOf([body]), "anthropic");
+		expect(report.usage.webSearchRequests).toBe(3);
+		expect(report.usage.outputTokens).toBe(320);
+	});
+
+	it("ストリーミングでない応答の Web 検索の回数を読む", () => {
+		const report = collectFromJson(
+			JSON.stringify({
+				type: "message",
+				model: "claude-sonnet-4-5",
+				usage: {
+					input_tokens: 50,
+					output_tokens: 10,
+					server_tool_use: { web_search_requests: 2, web_fetch_requests: 1 },
+				},
+			}),
+			"anthropic",
+		);
+		expect(report.usage.webSearchRequests).toBe(2);
 	});
 
 	it("count_tokens の応答は使用量として数えない", () => {

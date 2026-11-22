@@ -7,7 +7,7 @@ import {
 	zeroTotals,
 } from "../src/db/agent-sessions.ts";
 import { encryptText, sha256Hex } from "../src/lib/crypto.ts";
-import { clearPriceCache } from "../src/pricing/store.ts";
+import { clearPriceCache, repriceUnpriced } from "../src/pricing/store.ts";
 import {
 	diffTotals,
 	MANAGED_AGENTS_BETA,
@@ -297,7 +297,11 @@ describe("POST /v1/sessions の中継", () => {
 		const rows = sessionEventsRows();
 		expect(rows).toHaveLength(2);
 		for (const row of rows) {
-			expect(row).toMatchObject({ user_id: member, via: "bobert" });
+			expect(row).toMatchObject({
+				user_id: member,
+				via: "bobert",
+				web_search_requests: 0,
+			});
 		}
 	});
 });
@@ -362,6 +366,42 @@ describe("Cron でセッションを読む", () => {
 				.filter((row) => row.model === RUNTIME_MODEL)
 				.map((row) => row.cost_nano_usd),
 		).toEqual([2_000_000, 2_000_000]);
+	});
+
+	it("単価がなければ料金を空にし、単価を足したあと長い入力の単価を使わずに計算し直す", async () => {
+		db.rows("DELETE FROM model_prices");
+		clearPriceCache();
+		await proxy("POST", "/v1/sessions", { agent: "agent_1" });
+		const fake = upstream.sessions.get("sesn_1");
+		if (!fake) throw new Error("セッションがない");
+		fake.usage = { input_tokens: 300_000 };
+		await pollAgentSessions(env, ORIGIN);
+		const unpriced = db.rows(
+			"SELECT * FROM usage_events WHERE path = '/v1/sessions/sesn_1'",
+		);
+		expect(unpriced).toHaveLength(1);
+		expect(unpriced[0]).toMatchObject({
+			model: MODEL,
+			cost_nano_usd: null,
+			web_search_requests: 0,
+		});
+
+		db.rows(
+			"INSERT INTO model_prices (provider, model, source, price, updated_at) VALUES ('anthropic', ?, 'manual', ?, ?)",
+			MODEL,
+			JSON.stringify(PRICE),
+			Date.now(),
+		);
+		clearPriceCache();
+		expect(await repriceUnpriced(env.DB)).toBe(1);
+		const [row] = db.rows(
+			"SELECT cost_nano_usd, cost_source FROM usage_events WHERE path = '/v1/sessions/sesn_1'",
+		);
+		// 300,000 × $5 / 100万トークン(20万を超えたときの単価 $10 は使わない)
+		expect(row).toEqual({
+			cost_nano_usd: 1_500_000_000,
+			cost_source: "pricing",
+		});
 	});
 
 	it("20万トークンを超えても、長い入力の単価は使わない", async () => {
@@ -438,6 +478,7 @@ describe("Cron でセッションを読む", () => {
 				cacheWriteTokens: 0,
 				cacheWrite1hTokens: 0,
 				outputTokens: 10,
+				webSearchRequests: 0,
 			},
 			serviceTier: null,
 			costNano: 250_000,
