@@ -34,7 +34,8 @@ export function CliLoginPage() {
 						? { kind: "ready", login }
 						: {
 								kind: "error",
-								message: "このコードはもう使われています。",
+								message:
+									"このコードはもう使われています。ターミナルでやり直してください。",
 							},
 				),
 			)
